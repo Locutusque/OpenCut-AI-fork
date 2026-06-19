@@ -199,6 +199,40 @@ def _install_wheels_no_deps(py: Path, wheels: list[str]) -> None:
     run([str(py), "-m", "pip", "install", *TORCH_RUNTIME_DEPS])
 
 
+def _installed_version(py: Path, pkg: str) -> str | None:
+    """Return the version of `pkg` installed in the venv, or None if absent."""
+    code = f"import importlib.metadata as m;print(m.version({pkg!r}))"
+    try:
+        out = subprocess.check_output(
+            [str(py), "-c", code], text=True, stderr=subprocess.DEVNULL
+        )
+        return out.strip() or None
+    except Exception:
+        return None
+
+
+def _write_torch_constraints(py: Path, names: list[str], dest: Path) -> Path | None:
+    """Pin the installed torch package(s) to their exact versions in a pip
+    constraints file.
+
+    Without this, installing the service deps lets pip's resolver replace the
+    ROCm/CUDA torch build with a CPU wheel from PyPI -- transitive deps like
+    accelerate (torch>=2.0) and bitsandbytes (torch>=2.3) are enough to trigger
+    it even though we strip the direct torch line from requirements. Pinning the
+    exact installed versions (e.g. torch==2.9.1+rocm7.2.1) forces pip to keep the
+    build that's already present.
+    """
+    lines = []
+    for name in names:
+        ver = _installed_version(py, name)
+        if ver:
+            lines.append(f"{name}=={ver}")
+    if not lines:
+        return None
+    dest.write_text("\n".join(lines) + "\n")
+    return dest
+
+
 def install_torch(py: Path, svc: dict, torch_index: str | None, torch_wheels: list[str]) -> None:
     """Install the right PyTorch build for the platform into the venv."""
     pkgs = svc["torch"]  # e.g. ["torch"] or ["torch", "torchaudio"]
@@ -255,49 +289,60 @@ def install(py: Path, svc: dict, service_dir: Path, torch_index: str | None,
     # --- PyTorch -----------------------------------------------------------
     install_torch(py, svc, torch_index, torch_wheels)
 
-    # --- torchcodec (tts on torch 2.9, best-effort) ------------------------
-    # coqui-tts >=0.27.4 decodes audio via torchcodec on torch 2.9. --no-deps so
-    # it can't pull a CPU torch over the backend build; non-fatal if unavailable
-    # (coqui-tts falls back to soundfile).
-    if svc.get("wants_codec"):
-        try:
-            run([str(py), "-m", "pip", "install", "--no-deps", "torchcodec>=0.8.0"])
-        except subprocess.CalledProcessError:
-            log("torchcodec unavailable for this backend -- coqui-tts falls back to soundfile.")
+    # Pin the just-installed torch build so none of the dependency installs below
+    # can swap it for a CPU wheel from PyPI while resolving transitive deps.
+    constraints = _write_torch_constraints(
+        py, _torch_pkg_names(svc), service_dir / "constraints.torch.txt"
+    )
+    cflags = ["-c", str(constraints)] if constraints else []
 
-    # --- Triton (turboquant torch.compile path only) -----------------------
-    if svc.get("wants_triton"):
-        if IS_WINDOWS:
-            try:
-                run([str(py), "-m", "pip", "install", "triton-windows"])
-            except subprocess.CalledProcessError:
-                log("triton-windows install failed -- torch.compile will fall back to eager.")
-        else:
-            log("Triton provided by the torch ROCm wheels (pytorch-triton-rocm).")
-
-    # --- Service deps (minus torch + GPU-vendor lines) ---------------------
-    skip = tuple(s.lower() for s in svc["skip"])
-    req = (service_dir / "requirements.txt").read_text().splitlines()
-    filtered = [
-        ln for ln in req
-        if ln.strip() and not ln.strip().lower().startswith(skip)
-    ]
-    tmp = service_dir / "requirements.native.txt"
-    tmp.write_text("\n".join(filtered) + "\n")
     try:
-        run([str(py), "-m", "pip", "install", "-r", str(tmp)])
-    finally:
-        tmp.unlink(missing_ok=True)
+        # --- torchcodec (tts on torch 2.9, best-effort) --------------------
+        # coqui-tts >=0.27.4 decodes audio via torchcodec on torch 2.9. --no-deps
+        # so it can't pull a CPU torch over the backend build; non-fatal if
+        # unavailable (coqui-tts falls back to soundfile).
+        if svc.get("wants_codec"):
+            try:
+                run([str(py), "-m", "pip", "install", "--no-deps", "torchcodec>=0.8.0", *cflags])
+            except subprocess.CalledProcessError:
+                log("torchcodec unavailable for this backend -- coqui-tts falls back to soundfile.")
 
-    # --- bitsandbytes (turboquant only, best-effort) -----------------------
-    # The PyPI wheel is CUDA-only; on ROCm hosts it may lack GPU kernels, in
-    # which case app.py degrades to bf16 automatically. We still try so NVIDIA
-    # and any ROCm-enabled bnb builds get 4-bit.
-    if svc.get("wants_bnb"):
+        # --- Triton (turboquant torch.compile path only) -------------------
+        if svc.get("wants_triton"):
+            if IS_WINDOWS:
+                try:
+                    run([str(py), "-m", "pip", "install", "triton-windows", *cflags])
+                except subprocess.CalledProcessError:
+                    log("triton-windows install failed -- torch.compile will fall back to eager.")
+            else:
+                log("Triton provided by the torch ROCm wheels (pytorch-triton-rocm).")
+
+        # --- Service deps (minus torch + GPU-vendor lines) -----------------
+        skip = tuple(s.lower() for s in svc["skip"])
+        req = (service_dir / "requirements.txt").read_text().splitlines()
+        filtered = [
+            ln for ln in req
+            if ln.strip() and not ln.strip().lower().startswith(skip)
+        ]
+        tmp = service_dir / "requirements.native.txt"
+        tmp.write_text("\n".join(filtered) + "\n")
         try:
-            run([str(py), "-m", "pip", "install", "bitsandbytes"])
-        except subprocess.CalledProcessError:
-            log("bitsandbytes install failed -- model will load in bf16 (no 4-bit).")
+            run([str(py), "-m", "pip", "install", "-r", str(tmp), *cflags])
+        finally:
+            tmp.unlink(missing_ok=True)
+
+        # --- bitsandbytes (turboquant only, best-effort) -------------------
+        # The PyPI wheel is CUDA-only; on ROCm hosts it may lack GPU kernels, in
+        # which case app.py degrades to bf16 automatically. We still try so NVIDIA
+        # and any ROCm-enabled bnb builds get 4-bit.
+        if svc.get("wants_bnb"):
+            try:
+                run([str(py), "-m", "pip", "install", "bitsandbytes", *cflags])
+            except subprocess.CalledProcessError:
+                log("bitsandbytes install failed -- model will load in bf16 (no 4-bit).")
+    finally:
+        if constraints:
+            constraints.unlink(missing_ok=True)
 
 
 def main() -> int:
