@@ -1,0 +1,80 @@
+# Drop-in replacement for turboquant-service using an optimized, HF-loading
+# engine. Paths assume this lives at the OpenCut-AI repo root after transplant
+# (copy opencut-ai-fork/services/turbo-llm-service -> services/turbo-llm-service).
+#
+# ── Mode A: GPU (vLLM sidecar + lightweight adapter) ───────────────────────
+#   docker compose -f docker-compose.yml -f patches/docker-compose.turbo-llm.yml up -d --build
+#
+# We keep the service name `turboquant-service` so the ai-backend env
+# OPENCUTAI_TURBOQUANT_SERVICE_URL=http://turboquant-service:8430 keeps working
+# with ZERO changes. The adapter (port 8430) proxies to the vLLM sidecar.
+
+services:
+  turboquant-service:
+    build:
+      context: ./services/turbo-llm-service
+      dockerfile: Dockerfile
+    environment:
+      - ENGINE=vllm
+      - UPSTREAM_URL=http://vllm:8000
+      - MODEL_NAME=${TURBOQUANT_MODEL:-Qwen/Qwen2.5-3B-Instruct}
+      - KV_CACHE_BITS=${KV_CACHE_BITS:-4}
+      - MAX_CONTEXT_LENGTH=${MAX_CONTEXT_LENGTH:-8192}
+      - DEVICE=cuda
+      # Model lifecycle (matters for the ONNX engine; harmless for proxy mode,
+      # where vLLM owns its own VRAM — see MODEL_LOADING.md for the trade-off).
+      - REDIS_URL=redis://redis:6379
+      - MODEL_IDLE_TTL=${MODEL_IDLE_TTL:-120}
+      - GPU_HOLDER_ID=llm
+    depends_on:
+      - vllm
+      - redis
+    ports:
+      - "8430:8430"
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    command: >
+      --model ${TURBOQUANT_MODEL:-Qwen/Qwen2.5-3B-Instruct}
+      --max-model-len ${MAX_CONTEXT_LENGTH:-8192}
+      --kv-cache-dtype fp8
+      --gpu-memory-utilization 0.90
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  hf_cache:
+
+# ── Mode B: CPU (single container, Optimum/ONNX in-process) ────────────────
+# Don't use the vllm sidecar. Instead override turboquant-service like so
+# (put this in your own compose.override or edit the block above):
+#
+#   turboquant-service:
+#     build:
+#       context: ./services/turbo-llm-service
+#       dockerfile: Dockerfile.onnx
+#     environment:
+#       - ENGINE=onnx
+#       - DEVICE=cpu
+#       - MODEL_NAME=${TURBOQUANT_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}
+#       - ONNX_PROVIDER=CPUExecutionProvider
+#       - REDIS_URL=redis://redis:6379
+#       - MODEL_IDLE_TTL=${MODEL_IDLE_TTL:-120}
+#       - GPU_HOLDER_ID=llm
+#     volumes:
+#       - tq_models:/app/models
+#     ports:
+#       - "8430:8430"
+#
+# (and add `tq_models:` under the top-level `volumes:` key)

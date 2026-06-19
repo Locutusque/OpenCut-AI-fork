@@ -1,0 +1,10 @@
+# Base deps — lightweight adapter (proxy mode: vLLM / TGI upstream).
+# For the in-process CPU engine use requirements-onnx.txt instead.
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+pydantic==2.9.0
+httpx==0.27.0
+psutil>=5.9.0
+# Cross-service single-GPU coordination (gpu_lifecycle). Falls back to no
+# coordination if unset/unreachable.
+redis>=5.0.0
