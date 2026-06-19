@@ -113,6 +113,22 @@ WINDOWS_ROCM_REL = os.environ.get("ROCM_WINDOWS_REL", "rocm-rel-7.2.1")
 WINDOWS_ROCM_TORCH_VER = os.environ.get("ROCM_WINDOWS_TORCH_VER", "2.9.1")
 WINDOWS_ROCM_LOCAL_TAG = os.environ.get("ROCM_WINDOWS_LOCAL_TAG", "rocm7.2.1")
 
+# bitsandbytes on PyPI is CUDA-only, so on Windows ROCm we install a community
+# AMD/ROCm build instead (github.com/0xDELUXA/bitsandbytes_win_rocm). The wheel
+# filename only varies by cpXY; the GPU arch and ROCm version are in the release
+# TAG. We auto-pick the release from the detected GPU: RDNA (consumer Radeon,
+# gfx10xx-12xx; covers all RDNA, py3.11-3.13) vs CDNA (Instinct, gfx9xx). Force a
+# tag with ROCM_WINDOWS_BNB_TAG, or pass an exact wheel URL via --bnb-wheel /
+# ROCM_WINDOWS_BNB_WHEEL, if needed.
+WINDOWS_BNB_REPO = os.environ.get(
+    "ROCM_WINDOWS_BNB_REPO", "https://github.com/0xDELUXA/bitsandbytes_win_rocm"
+)
+WINDOWS_BNB_VER = os.environ.get("ROCM_WINDOWS_BNB_VER", "0.50.0.dev0")
+WINDOWS_BNB_TAG_RDNA = "0.50.0.dev0-py3-rocm7-win_amd64_rdna"
+WINDOWS_BNB_TAG_CDNA = "0.50.0.dev0-py3-rocm7-win_amd64_all"
+# Set ROCM_WINDOWS_BNB_TAG to force a specific release (skips auto-detection).
+WINDOWS_BNB_TAG = os.environ.get("ROCM_WINDOWS_BNB_TAG")
+
 # torch's own runtime deps -- pip --no-deps (used for the Windows ROCm wheels, per
 # AMD's guide) skips these, so we install them explicitly afterwards.
 TORCH_RUNTIME_DEPS = [
@@ -188,6 +204,57 @@ def _auto_windows_rocm_wheels(svc: dict) -> list[str]:
     ]
 
 
+def _detect_amd_gfx(py: Path) -> str | None:
+    """Probe the installed torch for the AMD GPU arch (e.g. 'gfx1100'), or None."""
+    probe = (
+        "import torch;"
+        "p=torch.cuda.get_device_properties(0) if torch.cuda.is_available() else None;"
+        "print(getattr(p,'gcnArchName','') if p is not None else '')"
+    )
+    try:
+        out = subprocess.check_output(
+            [str(py), "-c", probe], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        return out or None
+    except Exception:
+        return None
+
+
+def _windows_bnb_tag(py: Path) -> str:
+    """Pick the bitsandbytes release tag matching the detected GPU architecture.
+
+    RDNA (consumer Radeon, gfx10xx-12xx) uses the 'rdna' build; CDNA/Instinct
+    (gfx9xx) uses the 'all' build. ROCM_WINDOWS_BNB_TAG forces a specific tag.
+    """
+    if WINDOWS_BNB_TAG:
+        return WINDOWS_BNB_TAG
+    gfx = _detect_amd_gfx(py)
+    m = re.search(r"gfx([0-9a-f]+)", (gfx or "").lower())
+    arch = m.group(1) if m else ""
+    if arch.startswith("9"):  # gfx9xx == CDNA / GCN data-center parts
+        log(f"Detected AMD GPU {gfx} (CDNA) -> bitsandbytes 'all' build.")
+        return WINDOWS_BNB_TAG_CDNA
+    if gfx:
+        log(f"Detected AMD GPU {gfx} (RDNA) -> bitsandbytes 'rdna' build.")
+    else:
+        log("Could not detect AMD GPU arch via torch -> defaulting to bitsandbytes 'rdna' build.")
+    return WINDOWS_BNB_TAG_RDNA
+
+
+def _windows_rocm_bnb_wheel(py: Path) -> str:
+    """AMD/ROCm bitsandbytes wheel URL (0xDELUXA/bitsandbytes_win_rocm) for the
+    running Python + detected GPU arch, e.g. for Python 3.12 on RDNA:
+      https://github.com/0xDELUXA/bitsandbytes_win_rocm/releases/download/
+        0.50.0.dev0-py3-rocm7-win_amd64_rdna/
+        bitsandbytes-0.50.0.dev0-cp312-cp312-win_amd64.whl
+    """
+    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    return (
+        f"{WINDOWS_BNB_REPO}/releases/download/{_windows_bnb_tag(py)}/"
+        f"bitsandbytes-{WINDOWS_BNB_VER}-{py_tag}-{py_tag}-win_amd64.whl"
+    )
+
+
 def _install_wheels_no_deps(py: Path, wheels: list[str]) -> None:
     """Install torch wheel URL(s) with --no-deps, then torch's runtime deps.
 
@@ -197,6 +264,40 @@ def _install_wheels_no_deps(py: Path, wheels: list[str]) -> None:
     for wheel in wheels:
         run([str(py), "-m", "pip", "install", "--no-cache-dir", "--no-deps", wheel])
     run([str(py), "-m", "pip", "install", *TORCH_RUNTIME_DEPS])
+
+
+def _installed_version(py: Path, pkg: str) -> str | None:
+    """Return the version of `pkg` installed in the venv, or None if absent."""
+    code = f"import importlib.metadata as m;print(m.version({pkg!r}))"
+    try:
+        out = subprocess.check_output(
+            [str(py), "-c", code], text=True, stderr=subprocess.DEVNULL
+        )
+        return out.strip() or None
+    except Exception:
+        return None
+
+
+def _write_torch_constraints(py: Path, names: list[str], dest: Path) -> Path | None:
+    """Pin the installed torch package(s) to their exact versions in a pip
+    constraints file.
+
+    Without this, installing the service deps lets pip's resolver replace the
+    ROCm/CUDA torch build with a CPU wheel from PyPI -- transitive deps like
+    accelerate (torch>=2.0) and bitsandbytes (torch>=2.3) are enough to trigger
+    it even though we strip the direct torch line from requirements. Pinning the
+    exact installed versions (e.g. torch==2.9.1+rocm7.2.1) forces pip to keep the
+    build that's already present.
+    """
+    lines = []
+    for name in names:
+        ver = _installed_version(py, name)
+        if ver:
+            lines.append(f"{name}=={ver}")
+    if not lines:
+        return None
+    dest.write_text("\n".join(lines) + "\n")
+    return dest
 
 
 def install_torch(py: Path, svc: dict, torch_index: str | None, torch_wheels: list[str]) -> None:
@@ -248,56 +349,87 @@ def install_torch(py: Path, svc: dict, torch_index: str | None, torch_wheels: li
 
 
 def install(py: Path, svc: dict, service_dir: Path, torch_index: str | None,
-            torch_wheels: list[str]) -> None:
+            torch_wheels: list[str], bnb_wheel: str | None = None) -> None:
     """Install torch + the service deps into the venv."""
     run([str(py), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
 
     # --- PyTorch -----------------------------------------------------------
     install_torch(py, svc, torch_index, torch_wheels)
 
-    # --- torchcodec (tts on torch 2.9, best-effort) ------------------------
-    # coqui-tts >=0.27.4 decodes audio via torchcodec on torch 2.9. --no-deps so
-    # it can't pull a CPU torch over the backend build; non-fatal if unavailable
-    # (coqui-tts falls back to soundfile).
-    if svc.get("wants_codec"):
-        try:
-            run([str(py), "-m", "pip", "install", "--no-deps", "torchcodec>=0.8.0"])
-        except subprocess.CalledProcessError:
-            log("torchcodec unavailable for this backend -- coqui-tts falls back to soundfile.")
+    # Pin the just-installed torch build so none of the dependency installs below
+    # can swap it for a CPU wheel from PyPI while resolving transitive deps.
+    constraints = _write_torch_constraints(
+        py, _torch_pkg_names(svc), service_dir / "constraints.torch.txt"
+    )
+    cflags = ["-c", str(constraints)] if constraints else []
 
-    # --- Triton (turboquant torch.compile path only) -----------------------
-    if svc.get("wants_triton"):
-        if IS_WINDOWS:
-            try:
-                run([str(py), "-m", "pip", "install", "triton-windows"])
-            except subprocess.CalledProcessError:
-                log("triton-windows install failed -- torch.compile will fall back to eager.")
-        else:
-            log("Triton provided by the torch ROCm wheels (pytorch-triton-rocm).")
-
-    # --- Service deps (minus torch + GPU-vendor lines) ---------------------
-    skip = tuple(s.lower() for s in svc["skip"])
-    req = (service_dir / "requirements.txt").read_text().splitlines()
-    filtered = [
-        ln for ln in req
-        if ln.strip() and not ln.strip().lower().startswith(skip)
-    ]
-    tmp = service_dir / "requirements.native.txt"
-    tmp.write_text("\n".join(filtered) + "\n")
     try:
-        run([str(py), "-m", "pip", "install", "-r", str(tmp)])
-    finally:
-        tmp.unlink(missing_ok=True)
+        # --- torchcodec (tts on torch 2.9, best-effort) --------------------
+        # coqui-tts >=0.27.4 decodes audio via torchcodec on torch 2.9. --no-deps
+        # so it can't pull a CPU torch over the backend build; non-fatal if
+        # unavailable (coqui-tts falls back to soundfile).
+        if svc.get("wants_codec"):
+            try:
+                run([str(py), "-m", "pip", "install", "--no-deps", "torchcodec>=0.8.0", *cflags])
+            except subprocess.CalledProcessError:
+                log("torchcodec unavailable for this backend -- coqui-tts falls back to soundfile.")
 
-    # --- bitsandbytes (turboquant only, best-effort) -----------------------
-    # The PyPI wheel is CUDA-only; on ROCm hosts it may lack GPU kernels, in
-    # which case app.py degrades to bf16 automatically. We still try so NVIDIA
-    # and any ROCm-enabled bnb builds get 4-bit.
-    if svc.get("wants_bnb"):
+        # --- Triton (turboquant torch.compile path only) -------------------
+        if svc.get("wants_triton"):
+            if IS_WINDOWS:
+                try:
+                    run([str(py), "-m", "pip", "install", "triton-windows", *cflags])
+                except subprocess.CalledProcessError:
+                    log("triton-windows install failed -- torch.compile will fall back to eager.")
+            else:
+                log("Triton provided by the torch ROCm wheels (pytorch-triton-rocm).")
+
+        # --- Service deps (minus torch + GPU-vendor lines) -----------------
+        skip = tuple(s.lower() for s in svc["skip"])
+        req = (service_dir / "requirements.txt").read_text().splitlines()
+        filtered = [
+            ln for ln in req
+            if ln.strip() and not ln.strip().lower().startswith(skip)
+        ]
+        tmp = service_dir / "requirements.native.txt"
+        tmp.write_text("\n".join(filtered) + "\n")
         try:
-            run([str(py), "-m", "pip", "install", "bitsandbytes"])
-        except subprocess.CalledProcessError:
-            log("bitsandbytes install failed -- model will load in bf16 (no 4-bit).")
+            run([str(py), "-m", "pip", "install", "-r", str(tmp), *cflags])
+        finally:
+            tmp.unlink(missing_ok=True)
+
+        # --- bitsandbytes (turboquant only, best-effort) -------------------
+        # PyPI bitsandbytes is CUDA-only. On Windows we install a community
+        # AMD/ROCm build (0xDELUXA/bitsandbytes_win_rocm) so 4-bit works on
+        # Radeon; elsewhere we use the PyPI wheel (NVIDIA, or Linux ROCm builds).
+        # If the install fails app.py degrades to bf16 automatically.
+        if svc.get("wants_bnb"):
+            url = bnb_wheel or (_windows_rocm_bnb_wheel(py) if IS_WINDOWS else None)
+            have = _installed_version(py, "bitsandbytes")
+            try:
+                if url:
+                    # --no-deps so it can't drag a CPU torch in; deps are present.
+                    if bnb_wheel or have != WINDOWS_BNB_VER:
+                        log(f"Installing AMD/ROCm bitsandbytes from wheel: {url}")
+                        run([str(py), "-m", "pip", "install", "--no-deps", url, *cflags])
+                    else:
+                        log(f"AMD/ROCm bitsandbytes {have} already installed -- leaving it alone.")
+                else:
+                    run([str(py), "-m", "pip", "install", "bitsandbytes", *cflags])
+            except subprocess.CalledProcessError:
+                log(
+                    "bitsandbytes install failed -- model will load in bf16 (no 4-bit)."
+                    + (
+                        "\nWindows: no ROCm wheel for your Python/GPU at the default "
+                        "release. Set ROCM_WINDOWS_BNB_TAG to the release matching your "
+                        "GPU arch (RDNA2/RDNA/CDNA) or ROCM_WINDOWS_BNB_WHEEL to an "
+                        "exact wheel URL. See " + WINDOWS_BNB_REPO + "/releases"
+                        if IS_WINDOWS else ""
+                    )
+                )
+    finally:
+        if constraints:
+            constraints.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -314,6 +446,9 @@ def main() -> int:
                     help="Override the pip index URL used to install torch.")
     ap.add_argument("--torch-wheel", default=None,
                     help="Comma-separated torch wheel URL(s) (AMD Radeon Windows ROCm wheels).")
+    ap.add_argument("--bnb-wheel", default=os.environ.get("ROCM_WINDOWS_BNB_WHEEL") or None,
+                    help="bitsandbytes wheel URL (AMD/ROCm build). Defaults to the "
+                         "0xDELUXA/bitsandbytes_win_rocm release on Windows.")
     ap.add_argument("--no-install", action="store_true", help="Skip dependency install.")
     args = ap.parse_args()
 
@@ -331,7 +466,7 @@ def main() -> int:
         run([sys.executable, "-m", "venv", str(venv_dir)])
 
     if not args.no_install:
-        install(py, svc, service_dir, args.torch_index, torch_wheels)
+        install(py, svc, service_dir, args.torch_index, torch_wheels, args.bnb_wheel)
 
     ok, desc = torch_has_gpu(py)
     log(f"GPU check: {desc} -- torch.cuda.is_available()={ok}")
