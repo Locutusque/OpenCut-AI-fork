@@ -10,7 +10,9 @@ import { Inter } from "next/font/google";
 import { JsonLd } from "@/components/seo/json-ld";
 import { GoogleAnalytics } from "@/components/seo/google-analytics";
 
+export const dynamic = 'force-dynamic';
 const siteFont = Inter({ subsets: ["latin"] });
+
 
 export const metadata = baseMetaData;
 
