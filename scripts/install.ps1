@@ -265,10 +265,12 @@ Log-Info "Ollama API:  $OllamaUrl"
 if ($Native) {
     Write-Host ""
     Log-Step "GPU services (run natively so they can use your AMD GPU)"
-    Log-Info "First time? Install PyTorch for ROCm on Windows per AMD's Radeon guide:"
-    Log-Info "  https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html"
-    Log-Info "Then set the wheel URL(s) once so run-native.py installs them automatically:"
-    Log-Info '  $env:ROCM_WINDOWS_TORCH_WHEELS = "<torch-wheel-url>[,<torchaudio-wheel-url>]"'
+    Log-Info "PyTorch for ROCm is installed automatically on first run: run-native.py"
+    Log-Info "downloads the matching AMD Radeon wheels for your Python version. No"
+    Log-Info "manual setup needed (Python 3.10-3.13 supported)."
+    Log-Info "If AMD republishes under a new path, override ROCM_WINDOWS_REL /"
+    Log-Info "ROCM_WINDOWS_TORCH_VER, or set ROCM_WINDOWS_TORCH_WHEELS to exact URLs."
+    Log-Info "AMD's guide: https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html"
 
     # turboquant + image need only torch; tts + speaker also need torchaudio.
     $nativeServices = @(
