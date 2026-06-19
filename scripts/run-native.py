@@ -22,11 +22,12 @@ Examples
     python scripts/run-native.py --service turboquant
     python scripts/run-native.py --service image
 
-    # Windows (AMD ROCm) -- install torch from AMD's Radeon wheels (repo.radeon.com).
-    # Pass the wheel URL(s) for your Python version, comma-separated:
-    python scripts\\run-native.py --service tts ^
-      --torch-wheel https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torch-2.9.1+rocm7.2.1-cp312-cp312-win_amd64.whl,https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchaudio-2.9.1+rocm7.2.1-cp312-cp312-win_amd64.whl
-    # ...or set ROCM_WINDOWS_TORCH_WHEELS once and reuse it.
+    # Windows (AMD ROCm) -- zero-config: the matching torch wheels from AMD's
+    # Radeon repo (repo.radeon.com) are downloaded and installed automatically
+    # for your Python version. Just run:
+    python scripts\\run-native.py --service tts
+    # Override only if AMD republishes: --torch-wheel <url[,url2]>, or set
+    # ROCM_WINDOWS_TORCH_WHEELS / ROCM_WINDOWS_REL / ROCM_WINDOWS_TORCH_VER.
 
     # NVIDIA / explicit index override (any platform):
     python scripts/run-native.py --service image --torch-index https://download.pytorch.org/whl/cu128
@@ -40,6 +41,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -98,10 +100,18 @@ SERVICES: dict[str, dict] = {
 }
 
 # Default PyTorch ROCm wheel index for Linux (rocm6.4 -> torch 2.9). Windows ROCm
-# wheels are NOT on download.pytorch.org -- Windows users install torch 2.9.1 via
-# AMD's Radeon wheels (repo.radeon.com), passed with --torch-wheel /
-# ROCM_WINDOWS_TORCH_WHEELS.
+# wheels are NOT on download.pytorch.org -- they live on AMD's Radeon repo
+# (repo.radeon.com). We construct those wheel URLs automatically for the running
+# Python version so the Windows ROCm path is zero-config (no manual wheel hunting
+# or ROCM_WINDOWS_TORCH_WHEELS needed). The release/version pieces are pinned to a
+# known-good set matching the torch 2.9 series used across the services; each is
+# overridable via env in case AMD republishes under a new path.
 DEFAULT_LINUX_TORCH_INDEX = "https://download.pytorch.org/whl/rocm6.4"
+
+WINDOWS_ROCM_REPO = os.environ.get("ROCM_WINDOWS_REPO", "https://repo.radeon.com/rocm/windows")
+WINDOWS_ROCM_REL = os.environ.get("ROCM_WINDOWS_REL", "rocm-rel-7.2.1")
+WINDOWS_ROCM_TORCH_VER = os.environ.get("ROCM_WINDOWS_TORCH_VER", "2.9.1")
+WINDOWS_ROCM_LOCAL_TAG = os.environ.get("ROCM_WINDOWS_LOCAL_TAG", "rocm7.2.1")
 
 # torch's own runtime deps -- pip --no-deps (used for the Windows ROCm wheels, per
 # AMD's guide) skips these, so we install them explicitly afterwards.
@@ -154,6 +164,41 @@ def _windows_rocm_wheels(cli_value: str | None) -> list[str]:
     return [w.strip() for w in raw.split(",") if w.strip()]
 
 
+def _torch_pkg_names(svc: dict) -> list[str]:
+    """Bare distribution names for the torch wheels a service needs.
+
+    e.g. ["torch~=2.9.0", "torchaudio~=2.9.0"] -> ["torch", "torchaudio"].
+    """
+    return [re.split(r"[~=<>!\s]", spec, maxsplit=1)[0] for spec in svc["torch"]]
+
+
+def _auto_windows_rocm_wheels(svc: dict) -> list[str]:
+    """Build AMD Radeon Windows ROCm wheel URLs for the running interpreter.
+
+    Mirrors AMD's filename scheme, e.g. for Python 3.12:
+      https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/
+        torch-2.9.1+rocm7.2.1-cp312-cp312-win_amd64.whl
+    """
+    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    base = f"{WINDOWS_ROCM_REPO}/{WINDOWS_ROCM_REL}"
+    return [
+        f"{base}/{name}-{WINDOWS_ROCM_TORCH_VER}+{WINDOWS_ROCM_LOCAL_TAG}"
+        f"-{py_tag}-{py_tag}-win_amd64.whl"
+        for name in _torch_pkg_names(svc)
+    ]
+
+
+def _install_wheels_no_deps(py: Path, wheels: list[str]) -> None:
+    """Install torch wheel URL(s) with --no-deps, then torch's runtime deps.
+
+    --no-deps stops pip from replacing the ROCm build with a CPU wheel from PyPI,
+    so we add torch's own runtime deps explicitly afterwards (per AMD's guide).
+    """
+    for wheel in wheels:
+        run([str(py), "-m", "pip", "install", "--no-cache-dir", "--no-deps", wheel])
+    run([str(py), "-m", "pip", "install", *TORCH_RUNTIME_DEPS])
+
+
 def install_torch(py: Path, svc: dict, torch_index: str | None, torch_wheels: list[str]) -> None:
     """Install the right PyTorch build for the platform into the venv."""
     pkgs = svc["torch"]  # e.g. ["torch"] or ["torch", "torchaudio"]
@@ -161,12 +206,9 @@ def install_torch(py: Path, svc: dict, torch_index: str | None, torch_wheels: li
     already, desc = torch_has_gpu(py)
 
     if torch_wheels:
-        # AMD Radeon Windows wheels: install with --no-deps so pip can't replace
-        # the ROCm build with a CPU wheel from PyPI, then add torch's runtime deps.
+        # Explicit AMD Radeon Windows wheels (flag / ROCM_WINDOWS_TORCH_WHEELS).
         log(f"Installing torch from explicit wheel URL(s): {len(torch_wheels)} wheel(s)")
-        for wheel in torch_wheels:
-            run([str(py), "-m", "pip", "install", "--no-cache-dir", "--no-deps", wheel])
-        run([str(py), "-m", "pip", "install", *TORCH_RUNTIME_DEPS])
+        _install_wheels_no_deps(py, torch_wheels)
     elif index:
         log(f"Installing {' '.join(pkgs)} from index: {index}")
         run([str(py), "-m", "pip", "install", *pkgs, "--index-url", index])
@@ -175,14 +217,33 @@ def install_torch(py: Path, svc: dict, torch_index: str | None, torch_wheels: li
         run([str(py), "-m", "pip", "install", *pkgs, "--index-url", DEFAULT_LINUX_TORCH_INDEX])
     elif already:
         log(f"Using pre-installed {desc} (no torch index/wheel given) -- leaving it alone.")
+    elif IS_WINDOWS:
+        # Zero-config ROCm: construct AMD's Radeon wheel URLs for this Python and
+        # install them automatically (no manual wheel hunting / env var needed).
+        auto = _auto_windows_rocm_wheels(svc)
+        pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
+        log(f"Auto-installing AMD Radeon Windows ROCm torch for Python {pyver}:")
+        for w in auto:
+            log(f"  {w}")
+        try:
+            _install_wheels_no_deps(py, auto)
+        except subprocess.CalledProcessError:
+            log(
+                "Automatic ROCm torch install failed -- AMD may not publish wheels "
+                f"for Python {pyver}, or the release path changed.\n"
+                f"See AMD's guide: {WINDOWS_ROCM_GUIDE}\n"
+                "Then either install a supported Python (3.10-3.13), or override the\n"
+                "release/version via ROCM_WINDOWS_REL / ROCM_WINDOWS_TORCH_VER /\n"
+                "ROCM_WINDOWS_LOCAL_TAG, or pass exact URLs with --torch-wheel "
+                "<url[,url2]> / ROCM_WINDOWS_TORCH_WHEELS."
+            )
+            raise
     else:
         log(
             "No GPU-enabled torch found and no --torch-index/--torch-wheel given.\n"
-            "On Windows, install PyTorch for ROCm from AMD's Radeon wheels:\n"
+            f"On Windows, PyTorch for ROCm is installed automatically; otherwise see\n"
             f"  {WINDOWS_ROCM_GUIDE}\n"
-            "Then re-run with --no-install, or pass the wheel URL(s) via\n"
-            "  --torch-wheel <url[,url2]>   (e.g. torch + torchaudio), or set\n"
-            "  ROCM_WINDOWS_TORCH_WHEELS=<url[,url2]> in the environment."
+            "or pass --torch-index <url> for your platform's build."
         )
 
 
