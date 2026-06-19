@@ -405,6 +405,9 @@ def install(py: Path, svc: dict, service_dir: Path, torch_index: str | None,
 
     # --- PyTorch -----------------------------------------------------------
     install_torch(py, svc, torch_index, torch_wheels)
+    # Remember whether we ended up with a GPU build, so we can detect (and undo)
+    # a dependency install silently swapping it for a CPU wheel further down.
+    had_gpu_torch, _ = torch_has_gpu(py)
 
     # Pin the just-installed torch build so none of the dependency installs below
     # can swap it for a CPU wheel from PyPI while resolving transitive deps.
@@ -480,6 +483,19 @@ def install(py: Path, svc: dict, service_dir: Path, torch_index: str | None,
     finally:
         if constraints:
             constraints.unlink(missing_ok=True)
+
+    # --- Re-assert the GPU torch build last --------------------------------
+    # The constraints pin above normally keeps the ROCm/CUDA build in place, but
+    # it's not bulletproof (e.g. if the pin file couldn't be written, or a stray
+    # transitive pin slips through). If we started with a GPU build and a
+    # dependency install replaced it with a CPU wheel, reinstall it last so the
+    # GPU build is the final state -- nothing runs after this to clobber it.
+    if had_gpu_torch:
+        ok, desc = torch_has_gpu(py)
+        if not ok:
+            log(f"GPU torch was replaced during dependency install ({desc}) -- "
+                "reinstalling the GPU build last.")
+            install_torch(py, svc, torch_index, torch_wheels)
 
 
 def main() -> int:
