@@ -344,7 +344,11 @@ set up without auto-starting the GPU services.) To do it by hand instead:
    [Install PyTorch for Radeon/Ryzen on Windows](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html).
    Then point the launcher at the wheel URL(s) for your Python version so it
    installs them automatically (it uses `pip --no-deps` so PyPI can't overwrite
-   the ROCm build with a CPU one), plus, for turboquant, Triton
+   the ROCm build with a CPU one). The launcher also installs AMD's ROCm SDK
+   runtime wheels (`rocm_sdk_core` + libraries) that the Windows torch wheels
+   need — without them `import torch` fails with `ModuleNotFoundError: No module
+   named 'rocm_sdk'`; override their URLs with `ROCM_WINDOWS_SDK_WHEELS` if AMD
+   republishes them. Plus, for turboquant, Triton
    ([`triton-windows`](https://github.com/woct0rdho/triton-windows)):
 
    ```powershell

@@ -113,6 +113,20 @@ WINDOWS_ROCM_REL = os.environ.get("ROCM_WINDOWS_REL", "rocm-rel-7.2.1")
 WINDOWS_ROCM_TORCH_VER = os.environ.get("ROCM_WINDOWS_TORCH_VER", "2.9.1")
 WINDOWS_ROCM_LOCAL_TAG = os.environ.get("ROCM_WINDOWS_LOCAL_TAG", "rocm7.2.1")
 
+# AMD's Windows torch wheels are built against a *split* ROCm runtime: torch's
+# _rocm_init does `import rocm_sdk`, which lives in separate wheels next to torch
+# on repo.radeon.com (rocm_sdk_core = the python module + runtime, plus the
+# libraries wheel = the actual HIP/BLAS/etc DLLs). They are NOT on PyPI, so the
+# --no-deps torch install (which we use so pip can't swap in a CPU build) skips
+# them -- without them `import torch` dies with "ModuleNotFoundError: No module
+# named 'rocm_sdk'". We install them explicitly before torch. The wheels are
+# python-version-agnostic (py3-none-win_amd64) and tagged with the ROCm release
+# version (e.g. 7.2.1). Override the whole list with ROCM_WINDOWS_SDK_WHEELS
+# (comma-separated URLs) or the version with ROCM_WINDOWS_SDK_VER if AMD
+# republishes under a different path.
+WINDOWS_ROCM_SDK_VER = os.environ.get("ROCM_WINDOWS_SDK_VER", "7.2.1")
+WINDOWS_ROCM_SDK_PKGS = ("rocm_sdk_core", "rocm_sdk_libraries_custom")
+
 # bitsandbytes on PyPI is CUDA-only, so on Windows ROCm we install a community
 # AMD/ROCm build instead (github.com/0xDELUXA/bitsandbytes_win_rocm). The wheel
 # filename only varies by cpXY; the GPU arch and ROCm version are in the release
@@ -186,6 +200,38 @@ def _torch_pkg_names(svc: dict) -> list[str]:
     e.g. ["torch~=2.9.0", "torchaudio~=2.9.0"] -> ["torch", "torchaudio"].
     """
     return [re.split(r"[~=<>!\s]", spec, maxsplit=1)[0] for spec in svc["torch"]]
+
+
+def _windows_rocm_sdk_wheels() -> list[str]:
+    """ROCm SDK runtime wheel URLs (override list, else AMD's default layout)."""
+    raw = os.environ.get("ROCM_WINDOWS_SDK_WHEELS", "")
+    override = [w.strip() for w in raw.split(",") if w.strip()]
+    if override:
+        return override
+    base = f"{WINDOWS_ROCM_REPO}/{WINDOWS_ROCM_REL}"
+    return [
+        f"{base}/{name}-{WINDOWS_ROCM_SDK_VER}-py3-none-win_amd64.whl"
+        for name in WINDOWS_ROCM_SDK_PKGS
+    ]
+
+
+def _install_windows_rocm_sdk(py: Path) -> None:
+    """Install AMD's ROCm SDK runtime wheels that the Windows torch wheels need.
+
+    torch's _rocm_init does `import rocm_sdk`; that module (and the HIP runtime
+    DLLs) ship in separate wheels on repo.radeon.com that --no-deps skips. Without
+    them `import torch` fails with ModuleNotFoundError: No module named
+    'rocm_sdk'. Idempotent: skipped if rocm_sdk_core is already present.
+    """
+    if _installed_version(py, "rocm_sdk_core"):
+        log("ROCm SDK runtime (rocm_sdk_core) already installed -- leaving it alone.")
+        return
+    wheels = _windows_rocm_sdk_wheels()
+    log("Installing AMD ROCm SDK runtime wheels (provide the 'rocm_sdk' module):")
+    for w in wheels:
+        log(f"  {w}")
+    for wheel in wheels:
+        run([str(py), "-m", "pip", "install", "--no-cache-dir", "--no-deps", wheel])
 
 
 def _auto_windows_rocm_wheels(svc: dict) -> list[str]:
@@ -309,6 +355,8 @@ def install_torch(py: Path, svc: dict, torch_index: str | None, torch_wheels: li
     if torch_wheels:
         # Explicit AMD Radeon Windows wheels (flag / ROCM_WINDOWS_TORCH_WHEELS).
         log(f"Installing torch from explicit wheel URL(s): {len(torch_wheels)} wheel(s)")
+        if IS_WINDOWS:
+            _install_windows_rocm_sdk(py)
         _install_wheels_no_deps(py, torch_wheels)
     elif index:
         log(f"Installing {' '.join(pkgs)} from index: {index}")
@@ -327,6 +375,7 @@ def install_torch(py: Path, svc: dict, torch_index: str | None, torch_wheels: li
         for w in auto:
             log(f"  {w}")
         try:
+            _install_windows_rocm_sdk(py)
             _install_wheels_no_deps(py, auto)
         except subprocess.CalledProcessError:
             log(
@@ -335,8 +384,9 @@ def install_torch(py: Path, svc: dict, torch_index: str | None, torch_wheels: li
                 f"See AMD's guide: {WINDOWS_ROCM_GUIDE}\n"
                 "Then either install a supported Python (3.10-3.13), or override the\n"
                 "release/version via ROCM_WINDOWS_REL / ROCM_WINDOWS_TORCH_VER /\n"
-                "ROCM_WINDOWS_LOCAL_TAG, or pass exact URLs with --torch-wheel "
-                "<url[,url2]> / ROCM_WINDOWS_TORCH_WHEELS."
+                "ROCM_WINDOWS_LOCAL_TAG / ROCM_WINDOWS_SDK_VER, or pass exact URLs with\n"
+                "--torch-wheel <url[,url2]> / ROCM_WINDOWS_TORCH_WHEELS (and the SDK\n"
+                "runtime wheels via ROCM_WINDOWS_SDK_WHEELS)."
             )
             raise
     else:
@@ -355,6 +405,9 @@ def install(py: Path, svc: dict, service_dir: Path, torch_index: str | None,
 
     # --- PyTorch -----------------------------------------------------------
     install_torch(py, svc, torch_index, torch_wheels)
+    # Remember whether we ended up with a GPU build, so we can detect (and undo)
+    # a dependency install silently swapping it for a CPU wheel further down.
+    had_gpu_torch, _ = torch_has_gpu(py)
 
     # Pin the just-installed torch build so none of the dependency installs below
     # can swap it for a CPU wheel from PyPI while resolving transitive deps.
@@ -430,6 +483,19 @@ def install(py: Path, svc: dict, service_dir: Path, torch_index: str | None,
     finally:
         if constraints:
             constraints.unlink(missing_ok=True)
+
+    # --- Re-assert the GPU torch build last --------------------------------
+    # The constraints pin above normally keeps the ROCm/CUDA build in place, but
+    # it's not bulletproof (e.g. if the pin file couldn't be written, or a stray
+    # transitive pin slips through). If we started with a GPU build and a
+    # dependency install replaced it with a CPU wheel, reinstall it last so the
+    # GPU build is the final state -- nothing runs after this to clobber it.
+    if had_gpu_torch:
+        ok, desc = torch_has_gpu(py)
+        if not ok:
+            log(f"GPU torch was replaced during dependency install ({desc}) -- "
+                "reinstalling the GPU build last.")
+            install_torch(py, svc, torch_index, torch_wheels)
 
 
 def main() -> int:

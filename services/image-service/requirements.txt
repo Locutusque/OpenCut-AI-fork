@@ -12,3 +12,9 @@ transformers>=4.40.0
 accelerate>=0.30.0
 safetensors>=0.4.0
 rembg[cpu]>=2.0.50
+# numpy floor with prebuilt cp312+ wheels. Without it pip backtracks (chasing the
+# numba/onnxruntime ranges pulled in by rembg) all the way down to numpy 1.25.x,
+# which has no wheel for current Pythons and fails to build from source
+# (setuptools/pkgutil.ImpImporter was removed in 3.12+). 1.26 is the first numpy
+# with 3.12 wheels.
+numpy>=1.26.0
