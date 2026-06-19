@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    OpenCut AI — one-shot installer + launcher for Windows.
+    OpenCut AI -- one-shot installer + launcher for Windows.
 
 .DESCRIPTION
     The Windows counterpart of scripts/install.sh. Clones the repo (if needed),
-    detects your GPU, starts the Docker stack, and — because Docker can't pass an
-    AMD GPU through on Windows — runs the GPU-bound AI services (turboquant,
+    detects your GPU, starts the Docker stack, and -- because Docker can't pass an
+    AMD GPU through on Windows -- runs the GPU-bound AI services (turboquant,
     image, tts, speaker) natively on the host via scripts/run-native.py while the
     rest stays in Docker.
 
@@ -94,7 +94,7 @@ if (Test-Path (Join-Path $ScriptDir "..\docker-compose.yml")) {
 } else {
     Log-Step "Cloning $Repo"
     if (Test-Path (Join-Path $Dir ".git")) {
-        Log-Info "Repo already cloned at $Dir — pulling latest."
+        Log-Info "Repo already cloned at $Dir -- pulling latest."
         try { git -C $Dir pull --ff-only } catch { Log-Warn "git pull failed; using existing checkout." }
     } else {
         git clone --depth 1 $Repo $Dir
@@ -146,14 +146,14 @@ $Native = $false
 switch ($GpuMode) {
     "nvidia" {
         if (-not (Test-Path "docker-compose.gpu.yml")) {
-            Log-Error "docker-compose.gpu.yml missing — cannot start NVIDIA mode."; exit 1
+            Log-Error "docker-compose.gpu.yml missing -- cannot start NVIDIA mode."; exit 1
         }
         $composeArgs += @("-f", "docker-compose.gpu.yml")
         Log-Info "NVIDIA mode: turboquant-service runs on CUDA in Docker (Desktop + NVIDIA toolkit)."
     }
     "rocm" {
         if (-not (Test-Path "docker-compose.native-all.yml")) {
-            Log-Error "docker-compose.native-all.yml missing — cannot run native ROCm mode."; exit 1
+            Log-Error "docker-compose.native-all.yml missing -- cannot run native ROCm mode."; exit 1
         }
         $Native = $true
         $composeArgs += @("-f", "docker-compose.native-all.yml")
@@ -167,7 +167,7 @@ switch ($GpuMode) {
         )
         Log-Info "AMD ROCm mode (Windows): supporting stack in Docker, GPU services native on the host."
         if (-not $Python) {
-            Log-Warn "Python not found on PATH — needed for the native GPU services. Install Python 3.10+."
+            Log-Warn "Python not found on PATH -- needed for the native GPU services. Install Python 3.10+."
         }
     }
     "cpu" {
@@ -194,7 +194,7 @@ for ($i = 1; $i -le $MaxRetries; $i++) {
         Start-Sleep -Seconds $RetryInterval
     }
 }
-if ($ready) { Log-Info "Ollama is ready." } else { Log-Warn "Ollama not ready yet — LLM features may be delayed." }
+if ($ready) { Log-Info "Ollama is ready." } else { Log-Warn "Ollama not ready yet -- LLM features may be delayed." }
 
 # --- Pull the default model -------------------------------------------------
 if (-not $NoPull) {

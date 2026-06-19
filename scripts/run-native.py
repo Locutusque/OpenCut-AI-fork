@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run an OpenCut AI GPU service natively on the host GPU — cross-platform.
+"""Run an OpenCut AI GPU service natively on the host GPU -- cross-platform.
 
 Why this exists
 ---------------
@@ -8,21 +8,21 @@ is unsupported for most consumer Radeon cards). So on Windows the GPU-bound AI
 services have to run natively on the host. This launcher does that on
 **Windows, Linux and macOS** from one file.
 
-It handles every torch-using service — turboquant, image, tts and speaker — and
+It handles every torch-using service -- turboquant, image, tts and speaker -- and
 on Linux it's just an alternative to the Docker path. It creates an isolated
 venv per service, installs the right PyTorch build (ROCm/CUDA/CPU) plus the
 service deps, and starts the FastAPI app against your local GPU. The rest of the
-stack (Postgres, Redis, Ollama, web, ai-backend) keeps running in Docker — see
+stack (Postgres, Redis, Ollama, web, ai-backend) keeps running in Docker -- see
 scripts/install.ps1 / install.sh and docker-compose.native-all.yml, which point
 the Dockerised ai-backend at these host-native services.
 
 Examples
 --------
-    # Linux (AMD ROCm) — torch installed from the ROCm wheel index automatically
+    # Linux (AMD ROCm) -- torch installed from the ROCm wheel index automatically
     python scripts/run-native.py --service turboquant
     python scripts/run-native.py --service image
 
-    # Windows (AMD ROCm) — install torch from AMD's Radeon wheels (repo.radeon.com).
+    # Windows (AMD ROCm) -- install torch from AMD's Radeon wheels (repo.radeon.com).
     # Pass the wheel URL(s) for your Python version, comma-separated:
     python scripts\\run-native.py --service tts ^
       --torch-wheel https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torch-2.9.1+rocm7.2.1-cp312-cp312-win_amd64.whl,https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchaudio-2.9.1+rocm7.2.1-cp312-cp312-win_amd64.whl
@@ -97,13 +97,13 @@ SERVICES: dict[str, dict] = {
     },
 }
 
-# Default PyTorch ROCm wheel index for Linux (rocm6.4 → torch 2.9). Windows ROCm
-# wheels are NOT on download.pytorch.org — Windows users install torch 2.9.1 via
+# Default PyTorch ROCm wheel index for Linux (rocm6.4 -> torch 2.9). Windows ROCm
+# wheels are NOT on download.pytorch.org -- Windows users install torch 2.9.1 via
 # AMD's Radeon wheels (repo.radeon.com), passed with --torch-wheel /
 # ROCM_WINDOWS_TORCH_WHEELS.
 DEFAULT_LINUX_TORCH_INDEX = "https://download.pytorch.org/whl/rocm6.4"
 
-# torch's own runtime deps — pip --no-deps (used for the Windows ROCm wheels, per
+# torch's own runtime deps -- pip --no-deps (used for the Windows ROCm wheels, per
 # AMD's guide) skips these, so we install them explicitly afterwards.
 TORCH_RUNTIME_DEPS = [
     "filelock", "typing-extensions", "sympy", "networkx", "jinja2", "fsspec", "numpy",
@@ -174,7 +174,7 @@ def install_torch(py: Path, svc: dict, torch_index: str | None, torch_wheels: li
         log(f"Installing {' '.join(pkgs)} from ROCm wheel index: {DEFAULT_LINUX_TORCH_INDEX}")
         run([str(py), "-m", "pip", "install", *pkgs, "--index-url", DEFAULT_LINUX_TORCH_INDEX])
     elif already:
-        log(f"Using pre-installed {desc} (no torch index/wheel given) — leaving it alone.")
+        log(f"Using pre-installed {desc} (no torch index/wheel given) -- leaving it alone.")
     else:
         log(
             "No GPU-enabled torch found and no --torch-index/--torch-wheel given.\n"
@@ -202,7 +202,7 @@ def install(py: Path, svc: dict, service_dir: Path, torch_index: str | None,
         try:
             run([str(py), "-m", "pip", "install", "--no-deps", "torchcodec>=0.8.0"])
         except subprocess.CalledProcessError:
-            log("torchcodec unavailable for this backend — coqui-tts falls back to soundfile.")
+            log("torchcodec unavailable for this backend -- coqui-tts falls back to soundfile.")
 
     # --- Triton (turboquant torch.compile path only) -----------------------
     if svc.get("wants_triton"):
@@ -210,7 +210,7 @@ def install(py: Path, svc: dict, service_dir: Path, torch_index: str | None,
             try:
                 run([str(py), "-m", "pip", "install", "triton-windows"])
             except subprocess.CalledProcessError:
-                log("triton-windows install failed — torch.compile will fall back to eager.")
+                log("triton-windows install failed -- torch.compile will fall back to eager.")
         else:
             log("Triton provided by the torch ROCm wheels (pytorch-triton-rocm).")
 
@@ -236,7 +236,7 @@ def install(py: Path, svc: dict, service_dir: Path, torch_index: str | None,
         try:
             run([str(py), "-m", "pip", "install", "bitsandbytes"])
         except subprocess.CalledProcessError:
-            log("bitsandbytes install failed — model will load in bf16 (no 4-bit).")
+            log("bitsandbytes install failed -- model will load in bf16 (no 4-bit).")
 
 
 def main() -> int:
@@ -263,7 +263,7 @@ def main() -> int:
     py = venv_python(venv_dir)
     torch_wheels = _windows_rocm_wheels(args.torch_wheel)
 
-    log(f"Service: {args.service}  →  {service_dir}  (port {port})")
+    log(f"Service: {args.service}  ->  {service_dir}  (port {port})")
 
     if not py.exists():
         log(f"Creating venv at {venv_dir}")
@@ -273,7 +273,7 @@ def main() -> int:
         install(py, svc, service_dir, args.torch_index, torch_wheels)
 
     ok, desc = torch_has_gpu(py)
-    log(f"GPU check: {desc} — torch.cuda.is_available()={ok}")
+    log(f"GPU check: {desc} -- torch.cuda.is_available()={ok}")
     if not ok:
         log("WARNING: no GPU detected by torch; the service will run on CPU.")
 
