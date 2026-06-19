@@ -1,0 +1,34 @@
+# CPU image — in-process inference via HuggingFace Optimum + ONNX Runtime.
+# This is the single-container CPU deployment (no GPU sidecar needed).
+FROM python:3.11-slim
+
+COPY --from=ghcr.io/astral-sh/uv:0.9.28 /uv /uvx /bin/
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt requirements-onnx.txt ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system \
+      --index-strategy unsafe-best-match \
+      --extra-index-url https://download.pytorch.org/whl/cpu \
+      -r requirements-onnx.txt
+
+COPY . .
+
+# Cache HF + exported ONNX models under the mounted models volume.
+RUN mkdir -p /app/models
+ENV HF_HOME=/app/models
+ENV TRANSFORMERS_CACHE=/app/models
+ENV ENGINE=onnx
+ENV DEVICE=cpu
+
+EXPOSE 8430
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=10 \
+    CMD curl -f http://localhost:8430/health || exit 1
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8430"]
