@@ -87,21 +87,68 @@ try { docker info *> $null } catch {
 Log-Info "docker, docker compose, git present."
 
 # --- Locate or clone the repo -----------------------------------------------
+# Files the compute paths depend on. A stale shallow clone from before these
+# were added (or an interrupted clone) can be missing them, so we verify their
+# presence and refresh/re-clone when they're absent.
+$RequiredFiles = @("docker-compose.yml", "docker-compose.native-all.yml", "scripts\run-native.py")
+function Test-RepoComplete {
+    param($root)
+    foreach ($f in $RequiredFiles) {
+        if (-not (Test-Path (Join-Path $root $f))) { return $false }
+    }
+    return $true
+}
+
 $ScriptDir = $PSScriptRoot
 if (Test-Path (Join-Path $ScriptDir "..\docker-compose.yml")) {
     $ProjectRoot = (Resolve-Path (Join-Path $ScriptDir "..")).Path
     Log-Step "Using existing checkout at $ProjectRoot"
 } else {
     Log-Step "Cloning $Repo"
+
+    # Resolve the remote's default branch so we can force-sync onto its tip.
+    $DefaultBranch = "main"
+    try {
+        $symref = git ls-remote --symref $Repo HEAD 2>$null | Select-String 'refs/heads/'
+        if ($symref -and ($symref.ToString() -match 'refs/heads/(\S+)\s+HEAD')) { $DefaultBranch = $Matches[1] }
+    } catch {}
+
     if (Test-Path (Join-Path $Dir ".git")) {
-        Log-Info "Repo already cloned at $Dir -- pulling latest."
-        try { git -C $Dir pull --ff-only } catch { Log-Warn "git pull failed; using existing checkout." }
+        Log-Info "Repo already cloned at $Dir -- refreshing to latest origin/$DefaultBranch."
+        # The previous run may have made a shallow (--depth 1) clone. A plain
+        # 'git pull --ff-only' on such a checkout can report "Already up to date"
+        # and leave the user on stale code that is missing newer files. Instead,
+        # fetch the default branch tip and hard-reset onto it unconditionally.
+        try {
+            git -C $Dir remote set-url origin $Repo
+            git -C $Dir fetch --depth 1 origin $DefaultBranch
+            if ($LASTEXITCODE -eq 0) {
+                git -C $Dir reset --hard FETCH_HEAD
+            } else {
+                Log-Warn "Could not fetch origin/$DefaultBranch; will verify the existing checkout below."
+            }
+        } catch { Log-Warn "Refresh of existing checkout failed; will verify its contents below." }
     } else {
         git clone --depth 1 $Repo $Dir
     }
+
+    # If the checkout is still incomplete (e.g. a stale clone that couldn't be
+    # refreshed), discard it and clone fresh so required files are present.
+    if ((Test-Path $Dir) -and -not (Test-RepoComplete (Resolve-Path $Dir).Path)) {
+        Log-Warn "Checkout at $Dir is missing required files -- re-cloning from scratch."
+        Remove-Item -Recurse -Force $Dir -ErrorAction SilentlyContinue
+        git clone --depth 1 $Repo $Dir
+    }
+
     $ProjectRoot = (Resolve-Path $Dir).Path
 }
 Set-Location $ProjectRoot
+
+if (-not (Test-RepoComplete $ProjectRoot)) {
+    Log-Error "Repository at $ProjectRoot is missing required files (e.g. docker-compose.native-all.yml)."
+    Log-Error "Delete '$ProjectRoot' and re-run, or check out a branch that contains the full stack."
+    exit 1
+}
 
 # --- Environment file -------------------------------------------------------
 Log-Step "Preparing environment"
