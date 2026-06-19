@@ -8,15 +8,23 @@ httpx==0.27.0
 # Dockerfiles / run-native.py, pinned to the 2.9 series; this line is stripped
 # before the PyPI install (documentation of the expected version).
 torch~=2.9.0
-# Tighter lower bounds here are deliberate. With the wide-open floors below,
-# pip's resolver has to consider years of releases of transformers / tokenizers /
-# huggingface_hub (which constrain each other) on top of the pinned ROCm/CUDA
-# torch build, and gives up with "resolution-too-deep". Raising the floors to
-# recent, mutually-compatible versions prunes the search space so it resolves.
-transformers>=4.44.0
-accelerate>=0.33.0
-scipy>=1.11.0
-huggingface_hub>=0.24.0
+# Tighter lower bounds here are deliberate. With wide-open floors, pip's resolver
+# has to consider years of releases of transformers / tokenizers / huggingface_hub
+# / safetensors (which constrain each other) on top of the pinned ROCm/CUDA torch
+# build -- whose +rocm local version isn't on any index, so pip can't prune the
+# torch axis from candidates either -- and it backtracks until it gives up with
+# "resolution-too-deep". Raising the floors (and pinning the deep transitive HF
+# packages tokenizers / safetensors explicitly) to recent, mutually-compatible
+# versions caps the backtracking depth so it resolves. These floors still admit
+# the exact versions pip picks today (transformers 5.x, tokenizers 0.22.x).
+transformers>=4.57.0
+accelerate>=1.0.0
+scipy>=1.13.0
+huggingface_hub>=0.34.0
+# tokenizers / safetensors are pulled in by transformers with loose pins and have
+# many releases; explicit floors keep the resolver from walking their history.
+tokenizers>=0.22.0
+safetensors>=0.6.0
 # numpy floor with prebuilt cp312+ wheels so pip doesn't backtrack onto numpy
 # 1.25.x (no current-Python wheel; fails to build from source on 3.12+).
 numpy>=1.26.0

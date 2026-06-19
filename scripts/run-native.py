@@ -114,18 +114,27 @@ WINDOWS_ROCM_TORCH_VER = os.environ.get("ROCM_WINDOWS_TORCH_VER", "2.9.1")
 WINDOWS_ROCM_LOCAL_TAG = os.environ.get("ROCM_WINDOWS_LOCAL_TAG", "rocm7.2.1")
 
 # AMD's Windows torch wheels are built against a *split* ROCm runtime: torch's
-# _rocm_init does `import rocm_sdk`, which lives in separate wheels next to torch
-# on repo.radeon.com (rocm_sdk_core = the python module + runtime, plus the
-# libraries wheel = the actual HIP/BLAS/etc DLLs). They are NOT on PyPI, so the
-# --no-deps torch install (which we use so pip can't swap in a CPU build) skips
-# them -- without them `import torch` dies with "ModuleNotFoundError: No module
-# named 'rocm_sdk'". We install them explicitly before torch. The wheels are
-# python-version-agnostic (py3-none-win_amd64) and tagged with the ROCm release
-# version (e.g. 7.2.1). Override the whole list with ROCM_WINDOWS_SDK_WHEELS
-# (comma-separated URLs) or the version with ROCM_WINDOWS_SDK_VER if AMD
-# republishes under a different path.
+# _rocm_init does `import rocm_sdk`, and that runtime ships in separate packages
+# next to torch on repo.radeon.com, NOT on PyPI -- so the --no-deps torch install
+# (which we use so pip can't swap in a CPU build) skips them and `import torch`
+# dies with "ModuleNotFoundError: No module named 'rocm_sdk'". AMD's documented
+# Windows install set is:
+#   rocm_sdk_core-<ver>-py3-none-win_amd64.whl          (core HIP runtime)
+#   rocm_sdk_devel-<ver>-py3-none-win_amd64.whl         (devel bits)
+#   rocm_sdk_libraries_custom-<ver>-py3-none-win_amd64.whl  (HIP/BLAS/etc DLLs)
+#   rocm-<ver>.tar.gz                                   (the `rocm` selector sdist)
+# Crucially the *importable* `rocm_sdk` module is provided by the `rocm` selector
+# sdist -- the rocm_sdk_core wheel only provides `_rocm_sdk_core`. So installing
+# core + libraries alone is not enough; the sdist is what makes `import rocm_sdk`
+# (and hence `import torch`) work. We install the whole set together before torch
+# so pip can wire the sdist's pinned deps to the sibling wheel URLs. The wheels
+# are python-version-agnostic (py3-none-win_amd64) and tagged with the ROCm
+# release version (e.g. 7.2.1). Override the whole list with
+# ROCM_WINDOWS_SDK_WHEELS (comma-separated URLs) or the version with
+# ROCM_WINDOWS_SDK_VER if AMD republishes under a different path.
 WINDOWS_ROCM_SDK_VER = os.environ.get("ROCM_WINDOWS_SDK_VER", "7.2.1")
-WINDOWS_ROCM_SDK_PKGS = ("rocm_sdk_core", "rocm_sdk_libraries_custom")
+WINDOWS_ROCM_SDK_WHEELS = ("rocm_sdk_core", "rocm_sdk_devel", "rocm_sdk_libraries_custom")
+WINDOWS_ROCM_SDK_SDISTS = ("rocm",)  # provides the importable `rocm_sdk` module
 
 # bitsandbytes on PyPI is CUDA-only, so on Windows ROCm we install a community
 # AMD/ROCm build instead (github.com/0xDELUXA/bitsandbytes_win_rocm). The wheel
@@ -203,35 +212,48 @@ def _torch_pkg_names(svc: dict) -> list[str]:
 
 
 def _windows_rocm_sdk_wheels() -> list[str]:
-    """ROCm SDK runtime wheel URLs (override list, else AMD's default layout)."""
+    """ROCm SDK runtime package URLs (override list, else AMD's default layout).
+
+    Returns AMD's documented Windows install set: the win_amd64 runtime wheels
+    plus the `rocm` selector sdist (rocm-<ver>.tar.gz), which is what provides the
+    importable `rocm_sdk` module torch needs.
+    """
     raw = os.environ.get("ROCM_WINDOWS_SDK_WHEELS", "")
     override = [w.strip() for w in raw.split(",") if w.strip()]
     if override:
         return override
     base = f"{WINDOWS_ROCM_REPO}/{WINDOWS_ROCM_REL}"
-    return [
+    wheels = [
         f"{base}/{name}-{WINDOWS_ROCM_SDK_VER}-py3-none-win_amd64.whl"
-        for name in WINDOWS_ROCM_SDK_PKGS
+        for name in WINDOWS_ROCM_SDK_WHEELS
     ]
+    sdists = [
+        f"{base}/{name}-{WINDOWS_ROCM_SDK_VER}.tar.gz"
+        for name in WINDOWS_ROCM_SDK_SDISTS
+    ]
+    return [*wheels, *sdists]
 
 
 def _install_windows_rocm_sdk(py: Path) -> None:
-    """Install AMD's ROCm SDK runtime wheels that the Windows torch wheels need.
+    """Install AMD's ROCm SDK runtime packages that the Windows torch wheels need.
 
-    torch's _rocm_init does `import rocm_sdk`; that module (and the HIP runtime
-    DLLs) ship in separate wheels on repo.radeon.com that --no-deps skips. Without
-    them `import torch` fails with ModuleNotFoundError: No module named
-    'rocm_sdk'. Idempotent: skipped if rocm_sdk_core is already present.
+    torch's _rocm_init does `import rocm_sdk`; that module is provided by the
+    `rocm` selector sdist, with the HIP runtime DLLs in the rocm_sdk_core /
+    rocm_sdk_libraries wheels. None are on PyPI, and the --no-deps torch install
+    skips them, so `import torch` fails with ModuleNotFoundError: No module named
+    'rocm_sdk'. We install AMD's documented set in one command (no --no-deps) so
+    pip can wire the `rocm` sdist's pinned deps to the sibling wheel URLs -- the
+    packages reference each other but never reach out to PyPI. Idempotent:
+    skipped if the `rocm` selector package is already present.
     """
-    if _installed_version(py, "rocm_sdk_core"):
-        log("ROCm SDK runtime (rocm_sdk_core) already installed -- leaving it alone.")
+    if _installed_version(py, "rocm"):
+        log("ROCm SDK selector (rocm) already installed -- leaving it alone.")
         return
     wheels = _windows_rocm_sdk_wheels()
-    log("Installing AMD ROCm SDK runtime wheels (provide the 'rocm_sdk' module):")
+    log("Installing AMD ROCm SDK runtime packages (provide the 'rocm_sdk' module):")
     for w in wheels:
         log(f"  {w}")
-    for wheel in wheels:
-        run([str(py), "-m", "pip", "install", "--no-cache-dir", "--no-deps", wheel])
+    run([str(py), "-m", "pip", "install", "--no-cache-dir", *wheels])
 
 
 def _auto_windows_rocm_wheels(svc: dict) -> list[str]:
