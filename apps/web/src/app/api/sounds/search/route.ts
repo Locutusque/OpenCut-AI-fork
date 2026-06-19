@@ -1,4 +1,3 @@
-import { webEnv } from "@opencut-ai/env/web";
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -117,6 +116,8 @@ function transformFreesoundResult(
 	};
 }
 
+export const dynamic = "force-dynamic";
+
 export async function GET(request: NextRequest) {
 	try {
 		const { limited } = await checkRateLimit({ request });
@@ -170,7 +171,7 @@ export async function GET(request: NextRequest) {
 
 		// Prefer client-provided key (from localStorage) over server env
 		const clientApiKey = request.headers.get("x-freesound-api-key");
-		const apiKey = clientApiKey || webEnv.FREESOUND_API_KEY;
+		const apiKey = clientApiKey || process.env.FREESOUND_API_KEY;
 
 		if (!apiKey) {
 			return NextResponse.json(

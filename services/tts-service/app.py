@@ -6,6 +6,8 @@ Runs on port 8422.
 
 import logging
 import os
+import gc
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -19,6 +21,7 @@ logger = logging.getLogger(__name__)
 # Configuration via environment variables
 # ---------------------------------------------------------------------------
 TTS_MODEL = os.getenv("TTS_MODEL", "xtts_v2")
+TTS_IDLE_TTL_SECONDS = float(os.getenv("TTS_IDLE_TTL_SECONDS", "300"))
 GENERATED_DIR = os.getenv("GENERATED_DIR", "generated")
 VOICES_DIR = os.path.join(GENERATED_DIR, "voices")
 
@@ -128,6 +131,7 @@ class TTSService:
     _instance: "TTSService | None" = None
     _model = None
     _model_name: str = ""
+    _idle_timer: threading.Timer | None = None
 
     def __new__(cls) -> "TTSService":
         if cls._instance is None:
@@ -161,6 +165,7 @@ class TTSService:
 
     def load_model(self, model_name: str | None = None) -> dict:
         """Load a TTS model by name. Returns status dict."""
+        self._cancel_idle_unload()
         target = model_name or TTS_MODEL
 
         # If same model already loaded, skip
@@ -206,12 +211,34 @@ class TTSService:
             logger.exception("Failed to load TTS model '%s'", target)
             return {"status": "error", "error": str(e)}
 
+    def _cancel_idle_unload(self) -> None:
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def schedule_idle_unload(self) -> None:
+        if TTS_IDLE_TTL_SECONDS <= 0:
+            return
+        self._cancel_idle_unload()
+        self._idle_timer = threading.Timer(TTS_IDLE_TTL_SECONDS, self.unload_model)
+        self._idle_timer.daemon = True
+        self._idle_timer.start()
+        logger.info("TTS model will unload after %.0fs idle.", TTS_IDLE_TTL_SECONDS)
+
     def unload_model(self) -> None:
+        self._cancel_idle_unload()
         if self._model is not None:
             logger.info("Unloading TTS model '%s'...", self._model_name)
             del self._model
             self._model = None
             self._model_name = ""
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
             logger.info("TTS model unloaded.")
 
     @property
@@ -328,6 +355,7 @@ class TTSService:
             speaker_wav if needs_speaker_ref else None,
             output_path,
         )
+        self.schedule_idle_unload()
         return output_path
 
 
@@ -339,7 +367,7 @@ tts_service = TTSService()
 
 app = FastAPI(title="OpenCutAI TTS Service", version="1.0.0")
 
-AUTOLOAD = os.getenv("TTS_AUTOLOAD", "true").lower() in ("true", "1", "yes")
+AUTOLOAD = os.getenv("TTS_AUTOLOAD", "false").lower() in ("true", "1", "yes")
 
 
 @app.on_event("startup")

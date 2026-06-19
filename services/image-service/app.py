@@ -7,6 +7,7 @@ Runs on port 8423.
 
 import logging
 import os
+import threading
 import uuid
 from pathlib import Path
 
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 # Configuration via environment variables
 # ---------------------------------------------------------------------------
 DIFFUSION_MODEL = os.getenv("DIFFUSION_MODEL", "stabilityai/stable-diffusion-2-1")
+DIFFUSION_IDLE_TTL_SECONDS = float(os.getenv("DIFFUSION_IDLE_TTL_SECONDS", "300"))
 IMAGE_DEFAULT_WIDTH = int(os.getenv("IMAGE_DEFAULT_WIDTH", "512"))
 IMAGE_DEFAULT_HEIGHT = int(os.getenv("IMAGE_DEFAULT_HEIGHT", "512"))
 IMAGE_DEFAULT_STEPS = int(os.getenv("IMAGE_DEFAULT_STEPS", "20"))
@@ -150,6 +152,7 @@ class DiffusionService:
     _pipeline = None
     _model_name: str = ""
     _device: str = "cpu"
+    _idle_timer: threading.Timer | None = None
 
     def __new__(cls) -> "DiffusionService":
         if cls._instance is None:
@@ -179,6 +182,7 @@ class DiffusionService:
 
     def load_model(self, model_name: str | None = None) -> dict:
         """Load a diffusion model by name. Returns status dict."""
+        self._cancel_idle_unload()
         target = _resolve_model_name(model_name or DIFFUSION_MODEL)
 
         if self._pipeline is not None and self._model_name == target:
@@ -218,7 +222,25 @@ class DiffusionService:
             logger.exception("Failed to load diffusion model '%s'", target)
             return {"status": "error", "error": str(e)}
 
+    def _cancel_idle_unload(self) -> None:
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def schedule_idle_unload(self) -> None:
+        if DIFFUSION_IDLE_TTL_SECONDS <= 0:
+            return
+        self._cancel_idle_unload()
+        self._idle_timer = threading.Timer(DIFFUSION_IDLE_TTL_SECONDS, self.unload)
+        self._idle_timer.daemon = True
+        self._idle_timer.start()
+        logger.info(
+            "Diffusion pipeline will unload after %.0fs idle.",
+            DIFFUSION_IDLE_TTL_SECONDS,
+        )
+
     def unload(self) -> None:
+        self._cancel_idle_unload()
         if self._pipeline is not None:
             del self._pipeline
             self._pipeline = None
@@ -265,6 +287,7 @@ class DiffusionService:
 
         output_path = os.path.join(GENERATED_DIR, f"gen_{uuid.uuid4().hex[:8]}.png")
         image.save(output_path)
+        self.schedule_idle_unload()
         return output_path
 
 

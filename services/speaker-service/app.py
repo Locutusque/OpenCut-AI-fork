@@ -7,9 +7,11 @@ Accepts audio/video files and returns speaker segments and/or emotion annotation
 """
 
 import logging
+import gc
 import os
 import uuid
 import subprocess
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -31,15 +33,18 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
+MODEL_IDLE_TTL_SECONDS = float(os.getenv("MODEL_IDLE_TTL_SECONDS", "300"))
 
 # Lazy-load the pipeline to avoid loading on import
 _pipeline = None
 _pipeline_loaded = False
+_pipeline_idle_timer: threading.Timer | None = None
 
 
 def _get_pipeline():
     """Lazy-load the pyannote speaker diarization pipeline."""
     global _pipeline, _pipeline_loaded
+    _cancel_pipeline_idle_unload()
     if _pipeline_loaded:
         return _pipeline
 
@@ -70,6 +75,41 @@ def _get_pipeline():
         _pipeline = None
 
     return _pipeline
+
+
+def _cancel_pipeline_idle_unload():
+    global _pipeline_idle_timer
+    if _pipeline_idle_timer is not None:
+        _pipeline_idle_timer.cancel()
+        _pipeline_idle_timer = None
+
+
+def _schedule_pipeline_idle_unload():
+    global _pipeline_idle_timer
+    if MODEL_IDLE_TTL_SECONDS <= 0:
+        return
+    _cancel_pipeline_idle_unload()
+    _pipeline_idle_timer = threading.Timer(MODEL_IDLE_TTL_SECONDS, _unload_pipeline)
+    _pipeline_idle_timer.daemon = True
+    _pipeline_idle_timer.start()
+    logger.info("Speaker pipeline will unload after %.0fs idle.", MODEL_IDLE_TTL_SECONDS)
+
+
+def _unload_pipeline():
+    global _pipeline, _pipeline_loaded
+    _cancel_pipeline_idle_unload()
+    if _pipeline is not None:
+        logger.info("Unloading speaker diarization pipeline...")
+        del _pipeline
+        _pipeline = None
+        _pipeline_loaded = False
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
 
 
 async def _extract_audio(input_path: str) -> str:
@@ -171,14 +211,13 @@ def _fallback_diarization(audio_path: str, num_speakers: Optional[int] = None) -
 
 @app.get("/health")
 async def health():
-    pipeline = _get_pipeline()
     return {
         "service": "speaker-diarization",
         "status": "running",
         "model": {
-            "loaded": pipeline is not None,
-            "name": "pyannote/speaker-diarization-3.1" if pipeline else "fallback (silence-based)",
-            "installed": pipeline is not None,
+            "loaded": _pipeline is not None,
+            "name": "pyannote/speaker-diarization-3.1" if _pipeline else "not loaded",
+            "installed": _pipeline is not None,
         },
         "version": "0.1.0",
     }
@@ -261,6 +300,7 @@ async def diarize(
         logger.exception("Diarization failed")
         raise HTTPException(status_code=500, detail=f"Diarization failed: {str(e)}")
     finally:
+        _schedule_pipeline_idle_unload()
         for p in [upload_path, upload_path.rsplit(".", 1)[0] + "_audio.wav"]:
             if os.path.exists(p):
                 try:
@@ -273,11 +313,13 @@ async def diarize(
 
 _emotion_model = None
 _emotion_loaded = False
+_emotion_idle_timer: threading.Timer | None = None
 
 
 def _get_emotion_model():
     """Lazy-load the speechbrain emotion recognition model."""
     global _emotion_model, _emotion_loaded
+    _cancel_emotion_idle_unload()
     if _emotion_loaded:
         return _emotion_model
     _emotion_loaded = True
@@ -296,6 +338,41 @@ def _get_emotion_model():
         _emotion_model = None
 
     return _emotion_model
+
+
+def _cancel_emotion_idle_unload():
+    global _emotion_idle_timer
+    if _emotion_idle_timer is not None:
+        _emotion_idle_timer.cancel()
+        _emotion_idle_timer = None
+
+
+def _schedule_emotion_idle_unload():
+    global _emotion_idle_timer
+    if MODEL_IDLE_TTL_SECONDS <= 0:
+        return
+    _cancel_emotion_idle_unload()
+    _emotion_idle_timer = threading.Timer(MODEL_IDLE_TTL_SECONDS, _unload_emotion_model)
+    _emotion_idle_timer.daemon = True
+    _emotion_idle_timer.start()
+    logger.info("Emotion model will unload after %.0fs idle.", MODEL_IDLE_TTL_SECONDS)
+
+
+def _unload_emotion_model():
+    global _emotion_model, _emotion_loaded
+    _cancel_emotion_idle_unload()
+    if _emotion_model is not None:
+        logger.info("Unloading emotion model...")
+        del _emotion_model
+        _emotion_model = None
+        _emotion_loaded = False
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
 
 
 def _fallback_emotion_detection(audio_path: str, window_seconds: float = 5.0) -> list[dict]:
@@ -442,6 +519,7 @@ async def analyze_emotion(
         logger.exception("Emotion detection failed")
         raise HTTPException(status_code=500, detail=f"Emotion detection failed: {str(e)}")
     finally:
+        _schedule_emotion_idle_unload()
         for p in [upload_path, upload_path.rsplit(".", 1)[0] + "_audio.wav"]:
             if os.path.exists(p):
                 try:

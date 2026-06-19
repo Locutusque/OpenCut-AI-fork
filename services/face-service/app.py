@@ -7,8 +7,10 @@ auto-reframe (16:9 → 9:16) by centering on the active speaker's face.
 
 import json
 import logging
+import gc
 import os
 import subprocess
+import threading
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -34,13 +36,16 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
+MODEL_IDLE_TTL_SECONDS = float(os.getenv("MODEL_IDLE_TTL_SECONDS", "300"))
 
 # Initialize MediaPipe face detection (lazy)
 _detector = None
+_detector_idle_timer: threading.Timer | None = None
 
 
 def _get_detector():
     global _detector
+    _cancel_detector_idle_unload()
     if _detector is None:
         mp_face = mp.solutions.face_detection
         _detector = mp_face.FaceDetection(
@@ -48,6 +53,37 @@ def _get_detector():
             min_detection_confidence=0.5,
         )
     return _detector
+
+
+def _cancel_detector_idle_unload():
+    global _detector_idle_timer
+    if _detector_idle_timer is not None:
+        _detector_idle_timer.cancel()
+        _detector_idle_timer = None
+
+
+def _schedule_detector_idle_unload():
+    global _detector_idle_timer
+    if MODEL_IDLE_TTL_SECONDS <= 0:
+        return
+    _cancel_detector_idle_unload()
+    _detector_idle_timer = threading.Timer(MODEL_IDLE_TTL_SECONDS, _unload_detector)
+    _detector_idle_timer.daemon = True
+    _detector_idle_timer.start()
+    logger.info("Face detector will unload after %.0fs idle.", MODEL_IDLE_TTL_SECONDS)
+
+
+def _unload_detector():
+    global _detector
+    _cancel_detector_idle_unload()
+    if _detector is not None:
+        logger.info("Unloading MediaPipe face detector...")
+        try:
+            _detector.close()
+        except Exception:
+            pass
+        _detector = None
+        gc.collect()
 
 
 def _get_video_info(path: str) -> dict:
@@ -136,19 +172,13 @@ def _detect_faces_in_video(
 
 @app.get("/health")
 async def health():
-    try:
-        _get_detector()
-        model_loaded = True
-    except Exception:
-        model_loaded = False
-
     return {
         "service": "face-detection",
         "status": "running",
         "model": {
-            "loaded": model_loaded,
+            "loaded": _detector is not None,
             "name": "mediapipe-face-detection",
-            "installed": model_loaded,
+            "installed": True,
         },
         "version": "0.1.0",
     }
@@ -204,6 +234,7 @@ async def detect_faces(
         logger.exception("Face detection failed")
         raise HTTPException(status_code=500, detail=f"Face detection failed: {str(e)}")
     finally:
+        _schedule_detector_idle_unload()
         if os.path.exists(upload_path):
             try:
                 os.remove(upload_path)

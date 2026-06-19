@@ -7,6 +7,8 @@ Runs on port 8421.
 
 import logging
 import os
+import gc
+import threading
 import uuid
 from pathlib import Path
 
@@ -23,6 +25,7 @@ logger = logging.getLogger(__name__)
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+WHISPER_IDLE_TTL_SECONDS = float(os.getenv("WHISPER_IDLE_TTL_SECONDS", "300"))
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -119,6 +122,7 @@ class WhisperService:
     _instance: "WhisperService | None" = None
     _model = None
     _model_size: str = ""
+    _idle_timer: threading.Timer | None = None
 
     def __new__(cls) -> "WhisperService":
         if cls._instance is None:
@@ -134,6 +138,7 @@ class WhisperService:
         return self._model_size
 
     def load_model(self, model_size: str | None = None) -> None:
+        self._cancel_idle_unload()
         target_size = model_size or WHISPER_MODEL_SIZE
         if self._model is not None and self._model_size == target_size:
             logger.info("Whisper model '%s' already loaded.", target_size)
@@ -160,12 +165,37 @@ class WhisperService:
             logger.exception("Failed to load whisper model '%s'", target_size)
             raise
 
+    def _cancel_idle_unload(self) -> None:
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def schedule_idle_unload(self) -> None:
+        if WHISPER_IDLE_TTL_SECONDS <= 0:
+            return
+        self._cancel_idle_unload()
+        self._idle_timer = threading.Timer(WHISPER_IDLE_TTL_SECONDS, self.unload_model)
+        self._idle_timer.daemon = True
+        self._idle_timer.start()
+        logger.info(
+            "Whisper model will unload after %.0fs idle.",
+            WHISPER_IDLE_TTL_SECONDS,
+        )
+
     def unload_model(self) -> None:
+        self._cancel_idle_unload()
         if self._model is not None:
             logger.info("Unloading whisper model '%s'...", self._model_size)
             del self._model
             self._model = None
             self._model_size = ""
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
 
     def transcribe(
         self,
@@ -181,58 +211,61 @@ class WhisperService:
 
         logger.info("Transcribing '%s' (language=%s)...", audio_path, language or "auto")
 
-        segments_iter, info = self._model.transcribe(
-            audio_path,
-            language=language,
-            beam_size=5,
-            word_timestamps=True,
-            vad_filter=True,
-            vad_parameters={
-                "min_silence_duration_ms": 500,
-                "speech_pad_ms": 200,
-            },
-        )
-
-        segments: list[TranscriptionSegment] = []
-        full_text_parts: list[str] = []
-
-        for idx, seg in enumerate(segments_iter):
-            words = []
-            if seg.words:
-                for w in seg.words:
-                    words.append(
-                        TranscriptionWord(
-                            word=w.word.strip(),
-                            start=round(w.start, 3),
-                            end=round(w.end, 3),
-                            probability=round(w.probability, 4),
-                        )
-                    )
-
-            segment = TranscriptionSegment(
-                id=idx,
-                text=seg.text.strip(),
-                start=round(seg.start, 3),
-                end=round(seg.end, 3),
-                words=words,
-                avg_logprob=round(seg.avg_logprob, 4),
-                no_speech_prob=round(seg.no_speech_prob, 4),
+        try:
+            segments_iter, info = self._model.transcribe(
+                audio_path,
+                language=language,
+                beam_size=5,
+                word_timestamps=True,
+                vad_filter=True,
+                vad_parameters={
+                    "min_silence_duration_ms": 500,
+                    "speech_pad_ms": 200,
+                },
             )
-            segments.append(segment)
-            full_text_parts.append(seg.text.strip())
 
-        result = TranscriptionResult(
-            text=" ".join(full_text_parts),
-            segments=segments,
-            language=info.language,
-            duration=round(info.duration, 3),
-        )
+            segments: list[TranscriptionSegment] = []
+            full_text_parts: list[str] = []
 
-        logger.info(
-            "Transcription complete: %d segments, %.1fs duration, language=%s",
-            len(segments), info.duration, info.language,
-        )
-        return result
+            for idx, seg in enumerate(segments_iter):
+                words = []
+                if seg.words:
+                    for w in seg.words:
+                        words.append(
+                            TranscriptionWord(
+                                word=w.word.strip(),
+                                start=round(w.start, 3),
+                                end=round(w.end, 3),
+                                probability=round(w.probability, 4),
+                            )
+                        )
+
+                segment = TranscriptionSegment(
+                    id=idx,
+                    text=seg.text.strip(),
+                    start=round(seg.start, 3),
+                    end=round(seg.end, 3),
+                    words=words,
+                    avg_logprob=round(seg.avg_logprob, 4),
+                    no_speech_prob=round(seg.no_speech_prob, 4),
+                )
+                segments.append(segment)
+                full_text_parts.append(seg.text.strip())
+
+            result = TranscriptionResult(
+                text=" ".join(full_text_parts),
+                segments=segments,
+                language=info.language,
+                duration=round(info.duration, 3),
+            )
+
+            logger.info(
+                "Transcription complete: %d segments, %.1fs duration, language=%s",
+                len(segments), info.duration, info.language,
+            )
+            return result
+        finally:
+            self.schedule_idle_unload()
 
 
 whisper_service = WhisperService()

@@ -7,9 +7,9 @@ const webEnvSchema = z.object({
 	NEXT_RUNTIME: z.enum(["nodejs", "edge"]).optional(),
 
 	// Public
-	NEXT_PUBLIC_SITE_URL: z.url().default("http://localhost:3000"),
-	NEXT_PUBLIC_MARBLE_API_URL: z.url().default("https://api.marblecms.com"),
-	NEXT_PUBLIC_AI_BACKEND_URL: z.url().default("http://localhost:8420"),
+	NEXT_PUBLIC_SITE_URL: z.string().url().default("http://localhost:3000"),
+	NEXT_PUBLIC_MARBLE_API_URL: z.string().url().default("https://api.marblecms.com"),
+	NEXT_PUBLIC_AI_BACKEND_URL: z.string().url().default("http://localhost:8420"),
 
 	// Server — required for the app to function
 	DATABASE_URL: z
@@ -18,7 +18,7 @@ const webEnvSchema = z.object({
 		.or(z.string().startsWith("postgresql://")),
 
 	BETTER_AUTH_SECRET: z.string(),
-	UPSTASH_REDIS_REST_URL: z.url().default("http://localhost:8079"),
+	UPSTASH_REDIS_REST_URL: z.string().url().default("http://localhost:8079"),
 	UPSTASH_REDIS_REST_TOKEN: z.string().default("example_token"),
 
 	// Analytics (optional)
@@ -32,7 +32,7 @@ const webEnvSchema = z.object({
 	R2_ACCESS_KEY_ID: z.string().default(""),
 	R2_SECRET_ACCESS_KEY: z.string().default(""),
 	R2_BUCKET_NAME: z.string().default("opencut-transcription"),
-	MODAL_TRANSCRIPTION_URL: z.url().optional(),
+	MODAL_TRANSCRIPTION_URL: z.string().url().optional(),
 });
 
 export type WebEnv = z.infer<typeof webEnvSchema>;
