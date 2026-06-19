@@ -155,12 +155,35 @@ Or from an existing checkout:
 ./scripts/install.sh
 ```
 
-On **Windows**, use the PowerShell installer instead (it auto-runs the native
-GPU service for AMD cards — see [AMD ROCm on Windows](#amd-rocm-on-windows-native-gpu-service)):
+On **Windows**, use the installer in `scripts\` (it auto-runs the native GPU
+service for AMD cards — see [AMD ROCm on Windows](#amd-rocm-on-windows-native-gpu-service)).
+Double-click **`install.cmd`**, or run it from a terminal:
+
+```bat
+.\scripts\install.cmd
+```
+
+`install.cmd` is the recommended entry point: it's a batch file, so it is **not**
+blocked by PowerShell's script execution policy (the common
+*"running scripts is disabled on this system"* error). It just launches the
+PowerShell installer with the policy bypassed for that one run. You can still
+call the PowerShell script directly if your policy allows it:
 
 ```powershell
-.\scripts\install.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
+
+Both accept the same flags (e.g. `.\scripts\install.cmd -Rocm`).
+
+**Prefer a one-click installer?** Download **`OpenCutAI-Setup.exe`** from the
+[Releases page](https://github.com/Ekaanth/OpenCut-AI/releases) and run it. It's
+a small per-user (no-admin) installer that adds Start Menu / desktop shortcuts
+and runs the same setup — no execution-policy prompts. It's built by the
+[Windows Installer workflow](.github/workflows/windows-installer.yml) from
+[`installer/opencut-ai.iss`](installer/opencut-ai.iss). (The `.exe` is unsigned,
+so SmartScreen shows a one-time *"More info → Run anyway"* prompt.) You still
+need [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed
+and running.
 
 Useful flags:
 

@@ -1,0 +1,90 @@
+name: Windows Installer
+
+# Builds OpenCutAI-Setup.exe (Inno Setup) on a Windows runner.
+#
+#   - Every push/PR that touches the installer or launcher scripts -> build +
+#     upload the .exe as a workflow artifact (validation, nothing published).
+#   - Pushing a tag like v0.1.0 -> also attach the .exe to that GitHub Release.
+#   - Manual run (workflow_dispatch) -> build with an optional version override.
+#
+# Note: the produced .exe is UNSIGNED, so Windows SmartScreen will warn on first
+# run ("Windows protected your PC" -> More info -> Run anyway). To remove that,
+# add an Authenticode signing step with a code-signing certificate.
+
+on:
+  # Tag pushes build the installer AND attach it to the release. Tags are kept
+  # separate from path filtering on purpose: combining tags + paths under one
+  # push trigger can cause release builds to be skipped.
+  push:
+    tags: ["v*"]
+  # PRs that touch the installer or launchers build it for validation (no publish).
+  pull_request:
+    paths:
+      - "installer/**"
+      - "scripts/install.cmd"
+      - "scripts/install.ps1"
+      - "scripts/run-native.py"
+      - ".github/workflows/windows-installer.yml"
+  # Manual builds, with an optional version override.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Installer version (e.g. 0.1.0)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write # needed to attach the .exe to a Release on tag builds
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $ver = "0.1.0"
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $ver = $env:GITHUB_REF_NAME -replace '^v', ''
+          } elseif ("${{ github.event.inputs.version }}".Trim() -ne "") {
+            $ver = "${{ github.event.inputs.version }}".Trim()
+          }
+          Write-Host "Building installer version $ver"
+          "version=$ver" >> $env:GITHUB_OUTPUT
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        env:
+          OPENCUT_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          # Inno Setup 6 is preinstalled on windows-latest; fall back to choco.
+          $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+          $iscc = if ($cmd) { $cmd.Source } else { "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) {
+            Write-Host "Inno Setup not found - installing via Chocolatey..."
+            choco install innosetup -y --no-progress
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          Write-Host "Using ISCC: $iscc"
+          & $iscc "installer\opencut-ai.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compile failed ($LASTEXITCODE)" }
+          if (-not (Test-Path "installer\Output\OpenCutAI-Setup.exe")) {
+            throw "Expected installer\Output\OpenCutAI-Setup.exe was not produced"
+          }
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenCutAI-Setup-${{ steps.ver.outputs.version }}
+          path: installer/Output/OpenCutAI-Setup.exe
+          if-no-files-found: error
+
+      - name: Attach to release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer/Output/OpenCutAI-Setup.exe
