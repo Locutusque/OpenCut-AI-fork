@@ -7,5 +7,9 @@ aiofiles==24.1.0
 # these lines are stripped before the PyPI install (documentation only).
 torch~=2.9.0
 torchaudio~=2.9.0
-pyannote.audio>=3.1.0
+# pyannote.audio 4.0.2+ hard-pins torch==2.8.0 (to dodge a torchcodec segfault),
+# which can't be satisfied against the ROCm/CUDA torch 2.9 builds we install and
+# makes pip's resolver bail with ResolutionImpossible. The 3.x line only needs
+# torch>=2.0, so cap below 4 to keep it compatible with torch 2.9.
+pyannote.audio>=3.1.0,<4
 speechbrain>=1.0.0
