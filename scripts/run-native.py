@@ -115,15 +115,19 @@ WINDOWS_ROCM_LOCAL_TAG = os.environ.get("ROCM_WINDOWS_LOCAL_TAG", "rocm7.2.1")
 
 # bitsandbytes on PyPI is CUDA-only, so on Windows ROCm we install a community
 # AMD/ROCm build instead (github.com/0xDELUXA/bitsandbytes_win_rocm). The wheel
-# filename only varies by cpXY; the GPU arch (RDNA/CDNA) and ROCm version are in
-# the release TAG. We default to the RDNA "all variants" release (covers consumer
-# Radeon, py3.11-3.13). Override the tag (e.g. for CDNA/RDNA2) or pass an exact
-# wheel URL via env if needed.
+# filename only varies by cpXY; the GPU arch and ROCm version are in the release
+# TAG. We auto-pick the release from the detected GPU: RDNA (consumer Radeon,
+# gfx10xx-12xx; covers all RDNA, py3.11-3.13) vs CDNA (Instinct, gfx9xx). Force a
+# tag with ROCM_WINDOWS_BNB_TAG, or pass an exact wheel URL via --bnb-wheel /
+# ROCM_WINDOWS_BNB_WHEEL, if needed.
 WINDOWS_BNB_REPO = os.environ.get(
     "ROCM_WINDOWS_BNB_REPO", "https://github.com/0xDELUXA/bitsandbytes_win_rocm"
 )
-WINDOWS_BNB_TAG = os.environ.get("ROCM_WINDOWS_BNB_TAG", "0.50.0.dev0-py3-rocm7-win_amd64_rdna")
 WINDOWS_BNB_VER = os.environ.get("ROCM_WINDOWS_BNB_VER", "0.50.0.dev0")
+WINDOWS_BNB_TAG_RDNA = "0.50.0.dev0-py3-rocm7-win_amd64_rdna"
+WINDOWS_BNB_TAG_CDNA = "0.50.0.dev0-py3-rocm7-win_amd64_all"
+# Set ROCM_WINDOWS_BNB_TAG to force a specific release (skips auto-detection).
+WINDOWS_BNB_TAG = os.environ.get("ROCM_WINDOWS_BNB_TAG")
 
 # torch's own runtime deps -- pip --no-deps (used for the Windows ROCm wheels, per
 # AMD's guide) skips these, so we install them explicitly afterwards.
@@ -200,16 +204,53 @@ def _auto_windows_rocm_wheels(svc: dict) -> list[str]:
     ]
 
 
-def _auto_windows_rocm_bnb_wheel() -> str:
+def _detect_amd_gfx(py: Path) -> str | None:
+    """Probe the installed torch for the AMD GPU arch (e.g. 'gfx1100'), or None."""
+    probe = (
+        "import torch;"
+        "p=torch.cuda.get_device_properties(0) if torch.cuda.is_available() else None;"
+        "print(getattr(p,'gcnArchName','') if p is not None else '')"
+    )
+    try:
+        out = subprocess.check_output(
+            [str(py), "-c", probe], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        return out or None
+    except Exception:
+        return None
+
+
+def _windows_bnb_tag(py: Path) -> str:
+    """Pick the bitsandbytes release tag matching the detected GPU architecture.
+
+    RDNA (consumer Radeon, gfx10xx-12xx) uses the 'rdna' build; CDNA/Instinct
+    (gfx9xx) uses the 'all' build. ROCM_WINDOWS_BNB_TAG forces a specific tag.
+    """
+    if WINDOWS_BNB_TAG:
+        return WINDOWS_BNB_TAG
+    gfx = _detect_amd_gfx(py)
+    m = re.search(r"gfx([0-9a-f]+)", (gfx or "").lower())
+    arch = m.group(1) if m else ""
+    if arch.startswith("9"):  # gfx9xx == CDNA / GCN data-center parts
+        log(f"Detected AMD GPU {gfx} (CDNA) -> bitsandbytes 'all' build.")
+        return WINDOWS_BNB_TAG_CDNA
+    if gfx:
+        log(f"Detected AMD GPU {gfx} (RDNA) -> bitsandbytes 'rdna' build.")
+    else:
+        log("Could not detect AMD GPU arch via torch -> defaulting to bitsandbytes 'rdna' build.")
+    return WINDOWS_BNB_TAG_RDNA
+
+
+def _windows_rocm_bnb_wheel(py: Path) -> str:
     """AMD/ROCm bitsandbytes wheel URL (0xDELUXA/bitsandbytes_win_rocm) for the
-    running Python, e.g. for Python 3.12:
+    running Python + detected GPU arch, e.g. for Python 3.12 on RDNA:
       https://github.com/0xDELUXA/bitsandbytes_win_rocm/releases/download/
         0.50.0.dev0-py3-rocm7-win_amd64_rdna/
         bitsandbytes-0.50.0.dev0-cp312-cp312-win_amd64.whl
     """
     py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
     return (
-        f"{WINDOWS_BNB_REPO}/releases/download/{WINDOWS_BNB_TAG}/"
+        f"{WINDOWS_BNB_REPO}/releases/download/{_windows_bnb_tag(py)}/"
         f"bitsandbytes-{WINDOWS_BNB_VER}-{py_tag}-{py_tag}-win_amd64.whl"
     )
 
@@ -363,7 +404,7 @@ def install(py: Path, svc: dict, service_dir: Path, torch_index: str | None,
         # Radeon; elsewhere we use the PyPI wheel (NVIDIA, or Linux ROCm builds).
         # If the install fails app.py degrades to bf16 automatically.
         if svc.get("wants_bnb"):
-            url = bnb_wheel or (_auto_windows_rocm_bnb_wheel() if IS_WINDOWS else None)
+            url = bnb_wheel or (_windows_rocm_bnb_wheel(py) if IS_WINDOWS else None)
             have = _installed_version(py, "bitsandbytes")
             try:
                 if url:

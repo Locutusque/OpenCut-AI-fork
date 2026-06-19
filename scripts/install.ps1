@@ -271,9 +271,9 @@ if ($Native) {
     Log-Info "If AMD republishes under a new path, override ROCM_WINDOWS_REL /"
     Log-Info "ROCM_WINDOWS_TORCH_VER, or set ROCM_WINDOWS_TORCH_WHEELS to exact URLs."
     Log-Info "AMD's guide: https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html"
-    Log-Info "bitsandbytes (4-bit) uses an AMD/ROCm build; the default targets RDNA"
-    Log-Info "Radeon GPUs. For RDNA2/CDNA set ROCM_WINDOWS_BNB_TAG to the matching"
-    Log-Info "release at https://github.com/0xDELUXA/bitsandbytes_win_rocm/releases"
+    Log-Info "bitsandbytes (4-bit) uses an AMD/ROCm build auto-selected from your"
+    Log-Info "detected GPU (RDNA vs CDNA). Force a build with ROCM_WINDOWS_BNB_TAG"
+    Log-Info "from https://github.com/0xDELUXA/bitsandbytes_win_rocm/releases"
 
     # turboquant + image need only torch; tts + speaker also need torchaudio.
     $nativeServices = @(
