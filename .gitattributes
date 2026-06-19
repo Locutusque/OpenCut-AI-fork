@@ -1,0 +1,8 @@
+# Windows batch scripts must be CRLF so cmd.exe parses them reliably
+# (LF-only .cmd/.bat files can misbehave with labels/goto). Force CRLF on
+# checkout regardless of the contributor's core.autocrlf setting.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Unix shell scripts must stay LF even when checked out on Windows.
+*.sh text eol=lf
