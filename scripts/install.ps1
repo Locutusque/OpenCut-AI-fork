@@ -5,11 +5,12 @@
 .DESCRIPTION
     The Windows counterpart of scripts/install.sh. Clones the repo (if needed),
     detects your GPU, starts the Docker stack, and — because Docker can't pass an
-    AMD GPU through on Windows — runs the GPU-bound turboquant-service natively on
-    the host via scripts/run-native.py while the rest stays in Docker.
+    AMD GPU through on Windows — runs the GPU-bound AI services (turboquant,
+    image, tts, speaker) natively on the host via scripts/run-native.py while the
+    rest stays in Docker.
 
     Compute modes:
-      AMD (ROCm)  -> supporting stack in Docker + turboquant-service native (GPU)
+      AMD (ROCm)  -> supporting stack in Docker + GPU services native (host GPU)
       NVIDIA      -> full stack in Docker with the GPU override (Docker Desktop
                      + NVIDIA Container Toolkit expose the GPU through WSL2)
       CPU         -> full stack in Docker, no GPU
@@ -151,15 +152,22 @@ switch ($GpuMode) {
         Log-Info "NVIDIA mode: turboquant-service runs on CUDA in Docker (Desktop + NVIDIA toolkit)."
     }
     "rocm" {
-        if (-not (Test-Path "docker-compose.native-ai.yml")) {
-            Log-Error "docker-compose.native-ai.yml missing — cannot run native ROCm mode."; exit 1
+        if (-not (Test-Path "docker-compose.native-all.yml")) {
+            Log-Error "docker-compose.native-all.yml missing — cannot run native ROCm mode."; exit 1
         }
         $Native = $true
-        $composeArgs += @("-f", "docker-compose.native-ai.yml")
-        $upExtra = @("--scale", "turboquant-service=0")
-        Log-Info "AMD ROCm mode (Windows): supporting stack in Docker, GPU service native on the host."
+        $composeArgs += @("-f", "docker-compose.native-all.yml")
+        # Docker has no AMD GPU passthrough on Windows, so every torch-using
+        # service runs natively on the host instead. Scale those containers to 0.
+        $upExtra = @(
+            "--scale", "turboquant-service=0",
+            "--scale", "image-service=0",
+            "--scale", "tts-service=0",
+            "--scale", "speaker-service=0"
+        )
+        Log-Info "AMD ROCm mode (Windows): supporting stack in Docker, GPU services native on the host."
         if (-not $Python) {
-            Log-Warn "Python not found on PATH — needed for the native GPU service. Install Python 3.10+."
+            Log-Warn "Python not found on PATH — needed for the native GPU services. Install Python 3.10+."
         }
     }
     "cpu" {
@@ -206,25 +214,39 @@ Log-Info "Web App:     http://localhost:3100"
 Log-Info "AI Backend:  http://localhost:8420"
 Log-Info "Ollama API:  $OllamaUrl"
 
-# --- Native GPU service (AMD on Windows) ------------------------------------
+# --- Native GPU services (AMD on Windows) -----------------------------------
 if ($Native) {
     Write-Host ""
-    Log-Step "GPU service (runs natively so it can use your AMD GPU)"
+    Log-Step "GPU services (run natively so they can use your AMD GPU)"
     Log-Info "First time? Install PyTorch for ROCm on Windows per AMD's Radeon guide:"
     Log-Info "  https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html"
+    Log-Info "Then set the wheel URL(s) once so run-native.py installs them automatically:"
+    Log-Info '  $env:ROCM_WINDOWS_TORCH_WHEELS = "<torch-wheel-url>[,<torchaudio-wheel-url>]"'
+
+    # turboquant + image need only torch; tts + speaker also need torchaudio.
+    $nativeServices = @(
+        @{ name = "turboquant"; port = 8430 },
+        @{ name = "image";      port = 8423 },
+        @{ name = "tts";        port = 8422 },
+        @{ name = "speaker";    port = 8424 }
+    )
+    $runScript = Join-Path $ProjectRoot "scripts\run-native.py"
 
     if ($Python -and -not $NoNativeLaunch) {
-        Log-Info "Launching the native GPU service in a new window..."
-        $runScript = Join-Path $ProjectRoot "scripts\run-native.py"
-        Start-Process -FilePath "powershell" -ArgumentList @(
-            "-NoExit", "-Command", "& '$Python' '$runScript'"
-        ) -WorkingDirectory $ProjectRoot
-        Log-Info "Native turboquant-service starting on http://localhost:8430 (see the new window)."
-        Log-Info "The Dockerised ai-backend already points at it via host.docker.internal."
+        foreach ($svc in $nativeServices) {
+            Log-Info "Launching native $($svc.name)-service (port $($svc.port)) in a new window..."
+            Start-Process -FilePath "powershell" -ArgumentList @(
+                "-NoExit", "-Command", "& '$Python' '$runScript' --service $($svc.name)"
+            ) -WorkingDirectory $ProjectRoot
+        }
+        Log-Info "Native GPU services starting (one window each)."
+        Log-Info "The Dockerised ai-backend points at them via host.docker.internal."
     } else {
         $pyName = if ($Python) { $Python } else { "python" }
-        Log-Info "Start the GPU service yourself:"
-        Log-Info "  $pyName scripts\run-native.py"
+        Log-Info "Start the GPU services yourself (one terminal each):"
+        foreach ($svc in $nativeServices) {
+            Log-Info "  $pyName scripts\run-native.py --service $($svc.name)"
+        }
     }
 }
 

@@ -1,12 +1,17 @@
-# ROCm (AMD GPU) override.
+# ROCm (AMD GPU) override — Linux containers (incl. Docker Desktop on Windows
+# with a WSL2 ROCm setup). For AMD on Windows WITHOUT container GPU passthrough,
+# use the native path instead (scripts/run-native.py + docker-compose.native-ai.yml).
 #
 # Layer this on top of docker-compose.yml to run the AI compute services on an
-# AMD GPU via ROCm. It does two things:
+# AMD GPU via ROCm. It:
 #
 #   1. Swaps Ollama (the main local LLM) for the official `ollama/ollama:rocm`
 #      image and hands it the AMD GPU.
-#   2. Builds turboquant-service from Dockerfile.rocm (PyTorch ROCm wheels) and
-#      hands it the AMD GPU too.
+#   2. Rebuilds every torch-using service (turboquant, image, tts, speaker)
+#      against the PyTorch ROCm wheel index and hands each the AMD GPU. The
+#      service code already targets the GPU through torch's HIP backend
+#      (torch.cuda.is_available() is True on a ROCm build), so no app changes
+#      are needed — only the ROCm torch wheels and the device nodes.
 #
 # AMD exposes the GPU to containers through two device nodes — /dev/kfd (the
 # compute driver) and /dev/dri (the render nodes) — plus membership in the
@@ -20,17 +25,29 @@
 # Some consumer cards (RX 6000/7000, integrated GPUs) need an architecture
 # override so ROCm treats them as a supported gfx target — set
 # HSA_OVERRIDE_GFX_VERSION in .env (e.g. 10.3.0 for RDNA2, 11.0.0 for RDNA3).
+#
+# The ROCm torch wheel index defaults to rocm6.4 (ships torch 2.9, matching the
+# CPU/CUDA and AMD Windows ROCm builds); override ROCM_TORCH_INDEX +
+# ROCM_BASE_IMAGE together to match a different installed ROCm series.
+#
+# NOTE: whisper-service (CTranslate2) and face-service (MediaPipe) do not use
+# PyTorch and have no ROCm path, so they stay on CPU here — that's expected.
+
+# AMD GPU device passthrough, shared by every ROCm service.
+x-amd-gpu: &amd-gpu
+  devices:
+    - /dev/kfd
+    - /dev/dri
+  group_add:
+    - "${VIDEO_GID:-44}"
+    - "${RENDER_GID:-993}"
+  security_opt:
+    - seccomp:unconfined
+
 services:
   ollama:
     image: ollama/ollama:rocm
-    devices:
-      - /dev/kfd
-      - /dev/dri
-    group_add:
-      - "${VIDEO_GID:-44}"
-      - "${RENDER_GID:-993}"
-    security_opt:
-      - seccomp:unconfined
+    <<: *amd-gpu
     environment:
       - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}
       - ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-}
@@ -43,18 +60,11 @@ services:
         # Pin these to your ROCm series + GPU. scripts/install.sh detects the
         # gfx target from rocminfo and writes BNB_ROCM_ARCH to .env so
         # bitsandbytes is compiled with HIP for your exact card.
-        BASE_IMAGE: ${ROCM_BASE_IMAGE:-rocm/dev-ubuntu-22.04:6.2-complete}
-        ROCM_INDEX: ${ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.2}
+        BASE_IMAGE: ${ROCM_BASE_IMAGE:-rocm/dev-ubuntu-22.04:6.4-complete}
+        ROCM_INDEX: ${ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.4}
         BNB_ROCM_ARCH: ${BNB_ROCM_ARCH:-gfx1030;gfx1100;gfx1101;gfx90a;gfx942}
         BUILD_BNB: ${BUILD_BNB:-1}
-    devices:
-      - /dev/kfd
-      - /dev/dri
-    group_add:
-      - "${VIDEO_GID:-44}"
-      - "${RENDER_GID:-993}"
-    security_opt:
-      - seccomp:unconfined
+    <<: *amd-gpu
     environment:
       - DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-rocm}
       - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}
@@ -62,3 +72,37 @@ services:
       # torch.compile → Triton-ROCm kernels for faster inference. Set to 0 to
       # disable (e.g. to skip the one-time compile latency on first request).
       - TURBOQUANT_COMPILE=${TURBOQUANT_COMPILE:-1}
+
+  image-service:
+    build:
+      args:
+        TORCH_INDEX_URL: ${ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.4}
+        TORCH_PACKAGES: torch~=2.9.0
+    <<: *amd-gpu
+    environment:
+      - IMAGE_DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-auto}
+      - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}
+      - ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-}
+
+  tts-service:
+    build:
+      args:
+        # rocm6.4 ships torch 2.9; coqui-tts 0.27.x supports it (no torch<2.6 cap).
+        TORCH_INDEX_URL: ${ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.4}
+        TORCH_PACKAGES: torch~=2.9.0 torchaudio~=2.9.0
+    <<: *amd-gpu
+    environment:
+      - TTS_DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-auto}
+      - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}
+      - ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-}
+
+  speaker-service:
+    build:
+      args:
+        TORCH_INDEX_URL: ${ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.4}
+        TORCH_PACKAGES: torch~=2.9.0 torchaudio~=2.9.0
+    <<: *amd-gpu
+    environment:
+      - SPEAKER_DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-auto}
+      - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}
+      - ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-}

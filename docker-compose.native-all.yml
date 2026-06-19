@@ -1,0 +1,33 @@
+# Override for running ALL GPU-bound AI services NATIVELY on the host GPU while
+# the rest of the stack stays in Docker.
+#
+# This is the AMD ROCm path on Windows, where Docker has no GPU passthrough for
+# AMD cards. Each torch-using service (turboquant, image, tts, speaker) runs on
+# the host via `python scripts/run-native.py --service <name>`, and this file
+# repoints the Dockerised ai-backend at them through host.docker.internal.
+#
+# Start the supporting stack with the GPU services scaled to zero:
+#   docker compose -f docker-compose.yml -f docker-compose.native-all.yml \
+#     up -d --build \
+#     --scale turboquant-service=0 --scale image-service=0 \
+#     --scale tts-service=0 --scale speaker-service=0
+# then, in separate terminals (or via scripts/install.ps1), run each service:
+#   python scripts/run-native.py --service turboquant
+#   python scripts/run-native.py --service image
+#   python scripts/run-native.py --service tts
+#   python scripts/run-native.py --service speaker
+#
+# scripts/install.ps1 -Rocm wires all of this together on Windows. To offload
+# only some services, scale/launch just those and leave the rest in Docker.
+#
+# `host.docker.internal` resolves automatically on Docker Desktop (Windows/Mac);
+# the extra_hosts line makes it resolve on Linux Docker Engine too.
+services:
+  ai-backend:
+    environment:
+      - OPENCUTAI_TURBOQUANT_SERVICE_URL=http://host.docker.internal:8430
+      - OPENCUTAI_IMAGE_SERVICE_URL=http://host.docker.internal:8423
+      - OPENCUTAI_TTS_SERVICE_URL=http://host.docker.internal:8422
+      - OPENCUTAI_SPEAKER_SERVICE_URL=http://host.docker.internal:8424
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

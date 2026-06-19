@@ -24,9 +24,27 @@ TTS_MODEL = os.getenv("TTS_MODEL", "xtts_v2")
 TTS_IDLE_TTL_SECONDS = float(os.getenv("TTS_IDLE_TTL_SECONDS", "300"))
 GENERATED_DIR = os.getenv("GENERATED_DIR", "generated")
 VOICES_DIR = os.path.join(GENERATED_DIR, "voices")
+# Compute device override: auto (default) | cpu | cuda. "cuda" also selects an
+# AMD GPU when torch is a ROCm build — ROCm reuses the torch.cuda API via HIP.
+TTS_DEVICE = os.getenv("TTS_DEVICE", "auto").strip().lower()
 
 os.makedirs(GENERATED_DIR, exist_ok=True)
 os.makedirs(VOICES_DIR, exist_ok=True)
+
+
+def use_gpu() -> bool:
+    """Whether to place the model on GPU, honoring the TTS_DEVICE override.
+
+    True for NVIDIA CUDA and AMD ROCm torch builds (both via torch.cuda);
+    False on CPU-only builds or when TTS_DEVICE=cpu.
+    """
+    if TTS_DEVICE == "cpu":
+        return False
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
 
 # ---------------------------------------------------------------------------
 # Available TTS models
@@ -197,8 +215,7 @@ class TTSService:
             self._model_name = target
 
             try:
-                import torch
-                if torch.cuda.is_available():
+                if use_gpu():
                     self._model = self._model.to("cuda")
                     logger.info("TTS model loaded on GPU.")
                 else:

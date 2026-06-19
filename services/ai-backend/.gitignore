@@ -19,7 +19,9 @@ ENV/
 *~
 generated/
 uploads/
-models/
+# Downloaded model weights live in the service-root models/ dir.
+# Anchored with a leading slash so it does NOT match the app/models/ source package.
+/models/
 *.wav
 *.mp3
 *.mp4

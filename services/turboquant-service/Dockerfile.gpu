@@ -8,16 +8,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# NVIDIA CUDA build of the turboquant-service.
+#
+# torch is installed from the CUDA wheel index (cu128 by default), pinned to the
+# 2.9 series (~=2.9.0) so it matches the CPU/ROCm and AMD Windows ROCm builds
+# (torch 2.9.1). bitsandbytes (4-bit) comes from the same index family on PyPI,
+# and the optional NVIDIA cuTile extras (turboquant-gpu) are layered on top.
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+ARG TORCH_PACKAGES="torch~=2.9.0"
 ARG TURBOQUANT_EXTRAS=""
 
-COPY requirements.txt requirements.lock* ./
+COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
-    if [ -f requirements.lock ]; then \
-      uv pip install --system -r requirements.lock ; \
-    else \
-      uv pip install --system -r requirements.txt ; \
-    fi \
+    # 1. Install torch from the CUDA wheel index.
+    uv pip install --system --index-url "${TORCH_INDEX_URL}" ${TORCH_PACKAGES} \
+    # 2. Install the rest from PyPI, minus the GPU-vendor lines (torch installed
+    #    above, turboquant-gpu layered below). bitsandbytes stays — its PyPI
+    #    wheel ships CUDA kernels, which is exactly what we want here.
+ && grep -ivE '^(torch|turboquant-gpu)([[:space:]<>=!~;,]|$)' requirements.txt > requirements.cuda.txt \
+ && uv pip install --system -r requirements.cuda.txt \
+ && rm -f requirements.cuda.txt \
+    # 3. Optional NVIDIA cuTile extras.
  && if [ -n "$TURBOQUANT_EXTRAS" ]; then \
       uv pip install --system \
         --index-strategy unsafe-best-match \

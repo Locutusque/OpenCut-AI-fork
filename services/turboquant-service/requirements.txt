@@ -4,7 +4,10 @@ pydantic==2.9.0
 pydantic-settings>=2.5.0
 psutil>=5.9.0
 httpx==0.27.0
-torch>=2.0.0
+# torch is installed from a backend-specific wheel index (CPU/CUDA/ROCm) by the
+# Dockerfiles / run-native.py, pinned to the 2.9 series; this line is stripped
+# before the PyPI install (documentation of the expected version).
+torch~=2.9.0
 transformers>=4.40.0
 accelerate>=0.30.0
 scipy>=1.10.0

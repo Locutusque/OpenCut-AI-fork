@@ -30,9 +30,29 @@ IMAGE_DEFAULT_STEPS = int(os.getenv("IMAGE_DEFAULT_STEPS", "20"))
 IMAGE_DEFAULT_GUIDANCE = float(os.getenv("IMAGE_DEFAULT_GUIDANCE", "7.5"))
 GENERATED_DIR = os.getenv("GENERATED_DIR", "generated")
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
+# Compute device override: auto (default) | cpu | cuda. "cuda" also selects an
+# AMD GPU when torch is a ROCm build — ROCm reuses the torch.cuda API via HIP.
+IMAGE_DEVICE = os.getenv("IMAGE_DEVICE", "auto").strip().lower()
 
 os.makedirs(GENERATED_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+def resolve_device() -> tuple[str, bool]:
+    """Resolve the torch device, honoring the IMAGE_DEVICE override.
+
+    Returns (device, has_gpu). "cuda" is reported for both NVIDIA CUDA and AMD
+    ROCm torch builds; on CPU-only builds (or IMAGE_DEVICE=cpu) returns "cpu".
+    """
+    if IMAGE_DEVICE == "cpu":
+        return "cpu", False
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda", True
+    except Exception:
+        pass
+    return "cpu", False
 
 # ---------------------------------------------------------------------------
 # Available image generation models
@@ -201,9 +221,8 @@ class DiffusionService:
             import torch
             from diffusers import AutoPipelineForText2Image
 
-            has_cuda = torch.cuda.is_available()
+            device, has_cuda = resolve_device()
             dtype = torch.float16 if has_cuda else torch.float32
-            device = "cuda" if has_cuda else "cpu"
 
             logger.info("Loading diffusion model '%s' on %s...", target, device)
 

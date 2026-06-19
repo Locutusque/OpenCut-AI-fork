@@ -1,8 +1,9 @@
-# GPU override for the turboquant-service.
+# NVIDIA GPU override for the AI compute services.
 #
-# Layer this file on top of docker-compose.yml to run turboquant-service with
-# an NVIDIA GPU attached and the cuTile kernel extras installed. CPU users
-# should continue to run `docker compose up` without this file.
+# Layer this on top of docker-compose.yml to run the AI services on an NVIDIA
+# GPU. It builds each torch-using service against the CUDA PyTorch wheel index
+# and reserves the GPU for it. CPU users run `docker compose up` WITHOUT this
+# file (the base images install the CPU torch build — no CUDA packages).
 #
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
@@ -15,23 +16,58 @@
 #   TURBOQUANT_MODEL=moonshotai/Kimi-VL-A3B-Instruct docker compose \
 #     -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
 #
+# The CUDA wheel index defaults to cu128; override it for older drivers, e.g.
+#   CUDA_TORCH_INDEX=https://download.pytorch.org/whl/cu121 docker compose ...
+#
 # Requirements:
-#   - NVIDIA container toolkit installed on the host
+#   - NVIDIA Container Toolkit installed on the host (or Docker Desktop + WSL2)
 #   - Docker Compose v2.3+
-#   - CUDA 13+ driver for cuTile kernels (PyTorch fallback still works on older CUDA)
+#   - CUDA 13+ driver for turboquant cuTile kernels (PyTorch fallback works on older CUDA)
+
+x-nvidia-gpu: &nvidia-gpu
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: 1
+          capabilities: [gpu]
+
 services:
   turboquant-service:
     build:
       context: ./services/turboquant-service
       dockerfile: Dockerfile.gpu
       args:
+        TORCH_INDEX_URL: ${CUDA_TORCH_INDEX:-https://download.pytorch.org/whl/cu128}
         TURBOQUANT_EXTRAS: gpu
     environment:
       - DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-cuda}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    deploy: *nvidia-gpu
+
+  image-service:
+    build:
+      args:
+        TORCH_INDEX_URL: ${CUDA_TORCH_INDEX:-https://download.pytorch.org/whl/cu128}
+        TORCH_PACKAGES: torch~=2.9.0
+    environment:
+      - IMAGE_DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-auto}
+    deploy: *nvidia-gpu
+
+  tts-service:
+    build:
+      args:
+        # cu128 ships torch 2.9; coqui-tts 0.27.x supports it (no torch<2.6 cap).
+        TORCH_INDEX_URL: ${CUDA_TORCH_INDEX:-https://download.pytorch.org/whl/cu128}
+        TORCH_PACKAGES: torch~=2.9.0 torchaudio~=2.9.0
+    environment:
+      - TTS_DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-auto}
+    deploy: *nvidia-gpu
+
+  speaker-service:
+    build:
+      args:
+        TORCH_INDEX_URL: ${CUDA_TORCH_INDEX:-https://download.pytorch.org/whl/cu128}
+        TORCH_PACKAGES: torch~=2.9.0 torchaudio~=2.9.0
+    environment:
+      - SPEAKER_DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-auto}
+    deploy: *nvidia-gpu

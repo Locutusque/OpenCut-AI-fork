@@ -2,7 +2,10 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.0
 python-multipart==0.0.9
 aiofiles==24.1.0
-torch>=2.0.0
-torchaudio>=2.0.0
+# torch/torchaudio are installed from a backend-specific wheel index
+# (CPU/CUDA/ROCm) by the Dockerfile / run-native.py, pinned to the 2.9 series;
+# these lines are stripped before the PyPI install (documentation only).
+torch~=2.9.0
+torchaudio~=2.9.0
 pyannote.audio>=3.1.0
 speechbrain>=1.0.0

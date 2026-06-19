@@ -21,10 +21,14 @@
 #   BUILD_BNB       1 = build bitsandbytes from source (default), 0 = skip it
 #                   (model then loads in fp16 instead of 4-bit).
 
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:6.2-complete
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:6.4-complete
 FROM ${BASE_IMAGE}
 
-ARG ROCM_INDEX=https://download.pytorch.org/whl/rocm6.2
+# ROCm 6.4 wheel index ships torch 2.9, matching the CPU/CUDA builds and the AMD
+# Windows ROCm wheels (torch 2.9.1). Override ROCM_INDEX/BASE_IMAGE together to
+# pin a different ROCm series.
+ARG ROCM_INDEX=https://download.pytorch.org/whl/rocm6.4
+ARG TORCH_SPEC="torch~=2.9.0"
 ARG BNB_ROCM_ARCH="gfx1030;gfx1100;gfx1101;gfx90a;gfx942"
 ARG BUILD_BNB=1
 
@@ -48,7 +52,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
     uv pip install --system --break-system-packages \
       --index-url "$ROCM_INDEX" \
-      torch \
+      ${TORCH_SPEC} \
  && grep -vE '^(torch|bitsandbytes|turboquant-gpu)' requirements.txt > requirements.rocm.txt \
  && uv pip install --system --break-system-packages -r requirements.rocm.txt
 
