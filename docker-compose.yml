@@ -237,6 +237,7 @@ services:
       args:
         - FREESOUND_CLIENT_ID=${FREESOUND_CLIENT_ID}
         - FREESOUND_API_KEY=${FREESOUND_API_KEY}
+        - SKIP_ENV_VALIDATION=true
     restart: unless-stopped
     ports:
       - "3100:3000"
@@ -261,6 +262,7 @@ services:
       - NEXT_PUBLIC_WHISPER_SERVICE_URL=http://localhost:8421
       - NEXT_PUBLIC_TTS_SERVICE_URL=http://localhost:8422
       - NEXT_PUBLIC_IMAGE_SERVICE_URL=http://localhost:8423
+      - SKIP_ENV_VALIDATION=true
     depends_on:
       db:
         condition: service_healthy
