@@ -42,7 +42,7 @@ param(
     [switch]$NoPull,
     [switch]$NoNativeLaunch,
     [string]$Dir = "OpenCut-AI",
-    [string]$Repo = "https://github.com/Ekaanth/OpenCut-AI.git"
+    [string]$Repo = "https://github.com/Locutusque/OpenCut-AI-fork.git"
 )
 
 $ErrorActionPreference = "Stop"
