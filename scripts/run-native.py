@@ -113,6 +113,18 @@ WINDOWS_ROCM_REL = os.environ.get("ROCM_WINDOWS_REL", "rocm-rel-7.2.1")
 WINDOWS_ROCM_TORCH_VER = os.environ.get("ROCM_WINDOWS_TORCH_VER", "2.9.1")
 WINDOWS_ROCM_LOCAL_TAG = os.environ.get("ROCM_WINDOWS_LOCAL_TAG", "rocm7.2.1")
 
+# bitsandbytes on PyPI is CUDA-only, so on Windows ROCm we install a community
+# AMD/ROCm build instead (github.com/0xDELUXA/bitsandbytes_win_rocm). The wheel
+# filename only varies by cpXY; the GPU arch (RDNA/CDNA) and ROCm version are in
+# the release TAG. We default to the RDNA "all variants" release (covers consumer
+# Radeon, py3.11-3.13). Override the tag (e.g. for CDNA/RDNA2) or pass an exact
+# wheel URL via env if needed.
+WINDOWS_BNB_REPO = os.environ.get(
+    "ROCM_WINDOWS_BNB_REPO", "https://github.com/0xDELUXA/bitsandbytes_win_rocm"
+)
+WINDOWS_BNB_TAG = os.environ.get("ROCM_WINDOWS_BNB_TAG", "0.50.0.dev0-py3-rocm7-win_amd64_rdna")
+WINDOWS_BNB_VER = os.environ.get("ROCM_WINDOWS_BNB_VER", "0.50.0.dev0")
+
 # torch's own runtime deps -- pip --no-deps (used for the Windows ROCm wheels, per
 # AMD's guide) skips these, so we install them explicitly afterwards.
 TORCH_RUNTIME_DEPS = [
@@ -186,6 +198,20 @@ def _auto_windows_rocm_wheels(svc: dict) -> list[str]:
         f"-{py_tag}-{py_tag}-win_amd64.whl"
         for name in _torch_pkg_names(svc)
     ]
+
+
+def _auto_windows_rocm_bnb_wheel() -> str:
+    """AMD/ROCm bitsandbytes wheel URL (0xDELUXA/bitsandbytes_win_rocm) for the
+    running Python, e.g. for Python 3.12:
+      https://github.com/0xDELUXA/bitsandbytes_win_rocm/releases/download/
+        0.50.0.dev0-py3-rocm7-win_amd64_rdna/
+        bitsandbytes-0.50.0.dev0-cp312-cp312-win_amd64.whl
+    """
+    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    return (
+        f"{WINDOWS_BNB_REPO}/releases/download/{WINDOWS_BNB_TAG}/"
+        f"bitsandbytes-{WINDOWS_BNB_VER}-{py_tag}-{py_tag}-win_amd64.whl"
+    )
 
 
 def _install_wheels_no_deps(py: Path, wheels: list[str]) -> None:
@@ -282,7 +308,7 @@ def install_torch(py: Path, svc: dict, torch_index: str | None, torch_wheels: li
 
 
 def install(py: Path, svc: dict, service_dir: Path, torch_index: str | None,
-            torch_wheels: list[str]) -> None:
+            torch_wheels: list[str], bnb_wheel: str | None = None) -> None:
     """Install torch + the service deps into the venv."""
     run([str(py), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
 
@@ -332,14 +358,34 @@ def install(py: Path, svc: dict, service_dir: Path, torch_index: str | None,
             tmp.unlink(missing_ok=True)
 
         # --- bitsandbytes (turboquant only, best-effort) -------------------
-        # The PyPI wheel is CUDA-only; on ROCm hosts it may lack GPU kernels, in
-        # which case app.py degrades to bf16 automatically. We still try so NVIDIA
-        # and any ROCm-enabled bnb builds get 4-bit.
+        # PyPI bitsandbytes is CUDA-only. On Windows we install a community
+        # AMD/ROCm build (0xDELUXA/bitsandbytes_win_rocm) so 4-bit works on
+        # Radeon; elsewhere we use the PyPI wheel (NVIDIA, or Linux ROCm builds).
+        # If the install fails app.py degrades to bf16 automatically.
         if svc.get("wants_bnb"):
+            url = bnb_wheel or (_auto_windows_rocm_bnb_wheel() if IS_WINDOWS else None)
+            have = _installed_version(py, "bitsandbytes")
             try:
-                run([str(py), "-m", "pip", "install", "bitsandbytes", *cflags])
+                if url:
+                    # --no-deps so it can't drag a CPU torch in; deps are present.
+                    if bnb_wheel or have != WINDOWS_BNB_VER:
+                        log(f"Installing AMD/ROCm bitsandbytes from wheel: {url}")
+                        run([str(py), "-m", "pip", "install", "--no-deps", url, *cflags])
+                    else:
+                        log(f"AMD/ROCm bitsandbytes {have} already installed -- leaving it alone.")
+                else:
+                    run([str(py), "-m", "pip", "install", "bitsandbytes", *cflags])
             except subprocess.CalledProcessError:
-                log("bitsandbytes install failed -- model will load in bf16 (no 4-bit).")
+                log(
+                    "bitsandbytes install failed -- model will load in bf16 (no 4-bit)."
+                    + (
+                        "\nWindows: no ROCm wheel for your Python/GPU at the default "
+                        "release. Set ROCM_WINDOWS_BNB_TAG to the release matching your "
+                        "GPU arch (RDNA2/RDNA/CDNA) or ROCM_WINDOWS_BNB_WHEEL to an "
+                        "exact wheel URL. See " + WINDOWS_BNB_REPO + "/releases"
+                        if IS_WINDOWS else ""
+                    )
+                )
     finally:
         if constraints:
             constraints.unlink(missing_ok=True)
@@ -359,6 +405,9 @@ def main() -> int:
                     help="Override the pip index URL used to install torch.")
     ap.add_argument("--torch-wheel", default=None,
                     help="Comma-separated torch wheel URL(s) (AMD Radeon Windows ROCm wheels).")
+    ap.add_argument("--bnb-wheel", default=os.environ.get("ROCM_WINDOWS_BNB_WHEEL") or None,
+                    help="bitsandbytes wheel URL (AMD/ROCm build). Defaults to the "
+                         "0xDELUXA/bitsandbytes_win_rocm release on Windows.")
     ap.add_argument("--no-install", action="store_true", help="Skip dependency install.")
     args = ap.parse_args()
 
@@ -376,7 +425,7 @@ def main() -> int:
         run([sys.executable, "-m", "venv", str(venv_dir)])
 
     if not args.no_install:
-        install(py, svc, service_dir, args.torch_index, torch_wheels)
+        install(py, svc, service_dir, args.torch_index, torch_wheels, args.bnb_wheel)
 
     ok, desc = torch_has_gpu(py)
     log(f"GPU check: {desc} -- torch.cuda.is_available()={ok}")
