@@ -1,0 +1,53 @@
+# ROCm (AMD GPU) override.
+#
+# Layer this on top of docker-compose.yml to run the AI compute services on an
+# AMD GPU via ROCm. It does two things:
+#
+#   1. Swaps Ollama (the main local LLM) for the official `ollama/ollama:rocm`
+#      image and hands it the AMD GPU.
+#   2. Builds turboquant-service from Dockerfile.rocm (PyTorch ROCm wheels) and
+#      hands it the AMD GPU too.
+#
+# AMD exposes the GPU to containers through two device nodes — /dev/kfd (the
+# compute driver) and /dev/dri (the render nodes) — plus membership in the
+# host's `video` and `render` groups. The VIDEO_GID / RENDER_GID values are
+# host-specific; scripts/install.sh detects them and writes them to .env. If
+# you run compose by hand, set them yourself:
+#   VIDEO_GID=$(getent group video | cut -d: -f3) \
+#   RENDER_GID=$(getent group render | cut -d: -f3) \
+#   docker compose -f docker-compose.yml -f docker-compose.rocm.yml up -d --build
+#
+# Some consumer cards (RX 6000/7000, integrated GPUs) need an architecture
+# override so ROCm treats them as a supported gfx target — set
+# HSA_OVERRIDE_GFX_VERSION in .env (e.g. 10.3.0 for RDNA2, 11.0.0 for RDNA3).
+services:
+  ollama:
+    image: ollama/ollama:rocm
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-993}"
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}
+      - ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-}
+
+  turboquant-service:
+    build:
+      context: ./services/turboquant-service
+      dockerfile: Dockerfile.rocm
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-993}"
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      - DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-rocm}
+      - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}
+      - ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-}

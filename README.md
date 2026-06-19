@@ -124,13 +124,53 @@ packages/             — Shared packages (env, UI)
 - [Bun](https://bun.sh/docs/installation)
 - [Docker](https://docs.docker.com/get-docker/) with BuildKit support and [Docker Compose](https://docs.docker.com/compose/install/) v2.3+
 
-**GPU setup (optional, NVIDIA only):**
+**GPU setup (optional):**
+
+NVIDIA:
 
 - NVIDIA driver installed on the host (`nvidia-smi` must work on the host first)
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) so Docker can expose the GPU to containers
 - Recommended: CUDA 13+ driver for the `cuTile` kernel path used by TurboQuant (older drivers still work — they just fall back to the PyTorch KV-compression path)
 
+AMD (ROCm):
+
+- ROCm-capable AMD GPU with the amdgpu kernel driver loaded on the host (`rocminfo` should work, and `/dev/kfd` should exist)
+- No extra container toolkit needed — the GPU is passed through via `/dev/kfd` + `/dev/dri` and the `video`/`render` groups (handled by `docker-compose.rocm.yml`)
+
 > Docker is optional but recommended for running the database, Redis, and AI backend. Frontend-only development works without it.
+
+### One-Command Install (recommended)
+
+The fastest path. This single script clones the repo (if needed), auto-detects
+your GPU (NVIDIA / AMD-ROCm / CPU), builds and starts the full Docker stack with
+the right override file, and pulls the default LLM model:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ekaanth/OpenCut-AI/main/scripts/install.sh | bash
+```
+
+Or from an existing checkout:
+
+```bash
+./scripts/install.sh
+```
+
+Useful flags:
+
+| Flag | Effect |
+|------|--------|
+| `--auto` | Auto-detect the GPU (default) |
+| `--nvidia` | Force NVIDIA mode (`docker-compose.gpu.yml`) |
+| `--rocm` | Force AMD ROCm mode (`docker-compose.rocm.yml`) |
+| `--cpu` | Force CPU-only mode |
+| `--model <name>` | Ollama model to pull (default `llama3.2:1b`) |
+| `--no-pull` | Skip pulling the default model |
+| `--dir <path>` | Clone target dir (default `./OpenCut-AI`) |
+
+When it finishes, the editor is at [http://localhost:3100](http://localhost:3100).
+Stop everything with `docker compose down` (add the same `-f` override files you
+started with). The manual steps below are still available if you'd rather drive
+each piece yourself.
 
 ### Install and Run Locally
 
@@ -181,6 +221,42 @@ packages/             — Shared packages (env, UI)
    ```
 
    If `nvidia-smi` fails on the host, install the NVIDIA driver first. If it works on the host but fails inside the container, install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) and restart the Docker daemon (`sudo systemctl restart docker`).
+
+   **Option C — AMD GPU (ROCm):**
+
+   AMD GPUs run AI compute through [ROCm](https://rocm.docs.amd.com/). The
+   [`docker-compose.rocm.yml`](docker-compose.rocm.yml) override swaps Ollama
+   for the official `ollama/ollama:rocm` image and builds the turboquant-service
+   from `Dockerfile.rocm` (PyTorch ROCm wheels), handing both the AMD GPU.
+
+   The one-command installer handles all of this for you (`./scripts/install.sh --rocm`),
+   including detecting the host `video`/`render` group ids. To run it by hand:
+
+   ```bash
+   # Make sure the host has the amdgpu/ROCm kernel driver (rocminfo should work)
+   rocminfo | head
+
+   # ROCm exposes the GPU via /dev/kfd + /dev/dri and the video/render groups
+   export VIDEO_GID=$(getent group video  | cut -d: -f3)
+   export RENDER_GID=$(getent group render | cut -d: -f3)
+
+   export DOCKER_BUILDKIT=1
+   docker compose -f docker-compose.yml -f docker-compose.rocm.yml up -d --build
+
+   # Confirm the service reports the AMD GPU
+   curl -s http://localhost:8430/health | jq '{compute_mode, gpu_vendor, rocm, gpu_available}'
+   # Expected: {"compute_mode": "rocm", "gpu_vendor": "amd", "rocm": true, "gpu_available": true}
+   ```
+
+   Some consumer cards need an architecture override so ROCm treats them as a
+   supported target — set `HSA_OVERRIDE_GFX_VERSION` in the root `.env`
+   (`10.3.0` for RDNA2 / RX 6000, `11.0.0` for RDNA3 / RX 7000). The installer
+   leaves a commented hint in `.env` for you.
+
+   > **Why no cuTile / bitsandbytes on ROCm?** The TurboQuant cuTile kernels and
+   > bitsandbytes 4-bit path are NVIDIA-only. On ROCm the model still loads
+   > straight onto the AMD GPU (fp16) and `generate()` runs on-GPU — you just get
+   > the metrics-only turbo backend instead of the fused-kernel KV compression.
 
 4. Install dependencies and start the dev server:
 

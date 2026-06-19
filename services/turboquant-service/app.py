@@ -500,6 +500,14 @@ class ModelManager:
                 logger.info("Using bitsandbytes 4-bit quantization")
             except ImportError:
                 logger.warning("bitsandbytes not available — loading in fp16")
+        elif device == "rocm":
+            # AMD GPU via PyTorch-ROCm. Same torch.cuda API, but bitsandbytes
+            # 4-bit kernels are CUDA-only / unstable on ROCm, so we load the
+            # model in fp16 straight onto the GPU and skip the 4-bit path.
+            load_kwargs["torch_dtype"] = torch.float16
+            load_kwargs["device_map"] = "auto"
+            quantization = "fp16"
+            logger.info("Loading on AMD ROCm GPU in fp16 (bitsandbytes skipped)")
         elif device == "mps":
             load_kwargs["torch_dtype"] = torch.float16
             load_kwargs["device_map"] = {"": "mps"}
@@ -648,18 +656,41 @@ def _validate_model_id(model_id: str) -> None:
         )
 
 
+def _is_rocm() -> bool:
+    """True when the active torch build is the AMD ROCm/HIP build.
+
+    PyTorch's ROCm wheels expose the AMD GPU through the *same* ``torch.cuda``
+    API as NVIDIA (so ``torch.cuda.is_available()`` is True), but set
+    ``torch.version.hip`` to the HIP version string. That flag is the only
+    reliable way to tell an AMD GPU apart from an NVIDIA one at runtime.
+    """
+    return bool(getattr(torch.version, "hip", None))
+
+
+def _gpu_device() -> str:
+    """Resolve the CUDA-API GPU to its concrete label: 'rocm' on AMD, else 'cuda'."""
+    return "rocm" if _is_rocm() else "cuda"
+
+
 def _detect_device() -> str:
     """Detect the best available device.
 
-    Honors the DEVICE env var (auto/cpu/cuda/mps). When set to "cuda" on a host
-    without CUDA, we log a warning and fall back to the best available device
-    instead of crashing — this matters for the user-facing compute-mode toggle:
-    selecting GPU on a CPU-only machine should degrade gracefully.
+    Honors the DEVICE env var (auto/cpu/cuda/rocm/mps). When set to "cuda" or
+    "rocm" on a host without that GPU, we log a warning and fall back to the
+    best available device instead of crashing — this matters for the
+    user-facing compute-mode toggle: selecting GPU on a CPU-only machine should
+    degrade gracefully.
+
+    AMD GPUs go through PyTorch's ``torch.cuda`` API (it is HIP under the hood),
+    so both "cuda" and "rocm" requests are satisfied by ``torch.cuda``; we just
+    report the more accurate label.
     """
-    if DEVICE == "cuda":
+    if DEVICE in ("cuda", "rocm"):
         if torch.cuda.is_available():
-            return "cuda"
-        logger.warning("DEVICE=cuda requested but CUDA not available — falling back")
+            return _gpu_device()
+        logger.warning(
+            "DEVICE=%s requested but no CUDA/ROCm GPU available — falling back", DEVICE
+        )
     elif DEVICE == "cpu":
         return "cpu"
     elif DEVICE == "mps":
@@ -668,7 +699,7 @@ def _detect_device() -> str:
         logger.warning("DEVICE=mps requested but MPS not available — falling back")
     # auto path (also the fallback for unavailable explicit choices)
     if torch.cuda.is_available():
-        return "cuda"
+        return _gpu_device()
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
@@ -848,6 +879,8 @@ async def health() -> dict:
         ),
         "compression_ratio_last": manager.compression_ratio_last,
         "gpu_available": torch.cuda.is_available(),
+        "gpu_vendor": ("amd" if _is_rocm() else "nvidia") if torch.cuda.is_available() else None,
+        "rocm": _is_rocm(),
         "device": compute_mode,
         "compute_mode": compute_mode,
         "memory_usage": _memory_info(),

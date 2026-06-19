@@ -473,10 +473,13 @@ def create_turbo_backend(
     """Pick the right backend for the resolved device.
 
     `device` is the string resolved by `app._detect_device()` — one of
-    "cuda", "mps", or "cpu". MPS (Apple Silicon) is currently served by the
-    CPU backend because the cuTile kernel path is CUDA-only and the MPS
-    PyTorch fallback isn't meaningfully faster than CPU for the compression
-    probe. Real Apple Silicon support is a future story.
+    "cuda", "rocm", "mps", or "cpu". MPS (Apple Silicon) and ROCm (AMD) are
+    currently served by the CPU backend because the cuTile kernel path is
+    NVIDIA-only. On ROCm the model itself still lives on the AMD GPU (loaded via
+    `device_map="auto"`), so `model.generate` runs on-GPU — we just route
+    through the CPU-style backend, which never touches the missing cuTile
+    kernels and reports metrics only. Real Apple Silicon / native ROCm cuTile
+    support is a future story.
     """
     if device == "cuda":
         try:
