@@ -233,8 +233,15 @@ each piece yourself.
 
    AMD GPUs run AI compute through [ROCm](https://rocm.docs.amd.com/). The
    [`docker-compose.rocm.yml`](docker-compose.rocm.yml) override swaps Ollama
-   for the official `ollama/ollama:rocm` image and builds the turboquant-service
-   from `Dockerfile.rocm` (PyTorch ROCm wheels), handing both the AMD GPU.
+   for the official `ollama/ollama:rocm` image and rebuilds **every torch-using
+   service** — turboquant, image, tts and speaker — against the PyTorch ROCm
+   wheel index, handing each the AMD GPU. The service code targets the GPU
+   through torch's HIP backend (so `torch.cuda.is_available()` is `True` on a
+   ROCm build), meaning no app changes are needed — only the ROCm wheels and the
+   `/dev/kfd` + `/dev/dri` device nodes. (whisper-service and face-service don't
+   use PyTorch — CTranslate2 and MediaPipe — so they stay on CPU.) The ROCm wheel
+   index defaults to `rocm6.2`; override it with `ROCM_TORCH_INDEX` to match your
+   installed ROCm series.
 
    The one-command installer handles all of this for you (`./scripts/install.sh --rocm`),
    including detecting the host `video`/`render` group ids. To run it by hand:
@@ -292,44 +299,60 @@ each piece yourself.
 
 Docker **cannot pass an AMD GPU through to containers on Windows** (and ROCm in
 WSL2 is unsupported for most consumer Radeon cards). So on Windows the GPU-bound
-turboquant-service runs **natively on the host**, while the rest of the stack
-(Postgres, Redis, Ollama, web, other AI services) stays in Docker. The cross-
-platform launcher [`scripts/run-native.py`](scripts/run-native.py) handles the
-native service — it's pure Python, so the **same script also works on Linux and
-macOS**.
+AI services — **turboquant, image, tts and speaker** — run **natively on the
+host**, while the rest of the stack (Postgres, Redis, Ollama, web, ai-backend)
+stays in Docker. The cross-platform launcher
+[`scripts/run-native.py`](scripts/run-native.py) handles each native service via
+`--service <name>` — it's pure Python, so the **same script also works on Linux
+and macOS**.
 
 The one-command Windows installer does all of the below for you — it starts the
-Docker stack and launches the native GPU service in a new window:
+Docker stack and launches each native GPU service in its own window:
 
 ```powershell
 .\scripts\install.ps1
 ```
 
 (It auto-detects an AMD GPU; force it with `-Rocm`, or use `-NoNativeLaunch` to
-set up without auto-starting the GPU service.) To do it by hand instead:
+set up without auto-starting the GPU services.) To do it by hand instead:
 
 1. Install PyTorch for ROCm on Windows per AMD's guide:
    [Install PyTorch for Radeon/Ryzen on Windows](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html).
-   The launcher will install Triton ([`triton-windows`](https://github.com/woct0rdho/triton-windows),
-   the ROCm-capable Windows build) and the service deps for you.
-
-2. Start the supporting stack in Docker with the GPU container scaled to zero:
-
-   ```bash
-   docker compose -f docker-compose.yml -f docker-compose.native-ai.yml \
-     up -d --build --scale turboquant-service=0
-   ```
-
-3. Run the GPU service natively (in a second terminal):
+   Then point the launcher at the wheel URL(s) for your Python version so it
+   installs them automatically (it uses `pip --no-deps` so PyPI can't overwrite
+   the ROCm build with a CPU one), plus, for turboquant, Triton
+   ([`triton-windows`](https://github.com/woct0rdho/triton-windows)):
 
    ```powershell
-   python scripts\run-native.py
+   # torch only (turboquant, image) — or add the torchaudio wheel for tts/speaker
+   $env:ROCM_WINDOWS_TORCH_WHEELS = "https://repo.radeon.com/rocm/windows/.../torch-...win_amd64.whl,https://repo.radeon.com/rocm/windows/.../torchaudio-...win_amd64.whl"
    ```
 
-   It serves on `http://localhost:8430`, and `docker-compose.native-ai.yml`
-   already repoints the Dockerised ai-backend at it via `host.docker.internal`.
+2. Start the supporting stack in Docker with the GPU containers scaled to zero:
 
-On Linux/macOS the one-command installer wires all of this together:
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.native-all.yml \
+     up -d --build \
+     --scale turboquant-service=0 --scale image-service=0 \
+     --scale tts-service=0 --scale speaker-service=0
+   ```
+
+3. Run each GPU service natively (one terminal each):
+
+   ```powershell
+   python scripts\run-native.py --service turboquant   # port 8430
+   python scripts\run-native.py --service image        # port 8423
+   python scripts\run-native.py --service tts          # port 8422
+   python scripts\run-native.py --service speaker      # port 8424
+   ```
+
+   [`docker-compose.native-all.yml`](docker-compose.native-all.yml) repoints the
+   Dockerised ai-backend at all four via `host.docker.internal`. To offload only
+   some services, scale and launch just those and leave the rest in Docker.
+
+On Linux/macOS, ROCm works through Docker passthrough (Option C above), so the
+native path is rarely needed there; the installer can still wire up a single
+host-native turboquant with:
 
 ```bash
 ./scripts/install.sh --native-turboquant
@@ -401,10 +424,24 @@ Configure AI models in the **Settings > AI Models** panel inside the editor.
 
 All seven Python services (ai-backend, turboquant-service, whisper-service, tts-service, image-service, speaker-service, face-service) use [**uv**](https://docs.astral.sh/uv/) — Astral's Rust-based Python package manager — instead of pip. uv resolves and installs 10–100× faster than pip, so cold-cache Docker builds of the heavy services (torch, transformers, bitsandbytes) finish in seconds instead of minutes.
 
-Each service has two files that define its dependencies:
+Each service defines its dependencies in:
 
 - **`requirements.txt`** — the editable source of truth. Add / remove / pin packages here.
 - **`requirements.lock`** — the full transitive closure, autogenerated from `requirements.txt` via `uv pip compile --universal`. Commit this file; the Dockerfile installs from it for reproducible builds.
+
+> **PyTorch backend selection.** The torch-using services (image, tts, speaker,
+> turboquant) do **not** pin torch in a lockfile — a single lock can't be
+> backend-agnostic, and a CUDA-pinned lock would drag `nvidia-*`/`cuda-toolkit`
+> packages into CPU and ROCm builds alike. Instead their Dockerfiles install
+> torch (and torchaudio where needed) from a build-arg-selected wheel index and
+> then install the rest of `requirements.txt` with torch stripped, so the chosen
+> build is never replaced. The default index is CPU
+> (`https://download.pytorch.org/whl/cpu` — **no CUDA packages**); the
+> `docker-compose.gpu.yml` / `docker-compose.rocm.yml` overrides set
+> `TORCH_INDEX_URL` to the CUDA (`cu128`, override with `CUDA_TORCH_INDEX`) or
+> ROCm (`rocm6.2`, override with `ROCM_TORCH_INDEX`) index. So a plain
+> `docker compose up` stays completely CUDA-free, and switching backends never
+> requires regenerating a lockfile.
 
 After editing a `requirements.txt`, regenerate the matching lockfile:
 

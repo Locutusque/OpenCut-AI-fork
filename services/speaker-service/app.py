@@ -34,6 +34,20 @@ app.add_middleware(
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 MODEL_IDLE_TTL_SECONDS = float(os.getenv("MODEL_IDLE_TTL_SECONDS", "300"))
+# Compute device override: auto (default) | cpu | cuda. "cuda" also selects an
+# AMD GPU when torch is a ROCm build — ROCm reuses the torch.cuda API via HIP.
+SPEAKER_DEVICE = os.getenv("SPEAKER_DEVICE", "auto").strip().lower()
+
+
+def _torch_device(torch):
+    """Resolve a torch.device, honoring the SPEAKER_DEVICE override.
+
+    Picks "cuda" for NVIDIA CUDA and AMD ROCm builds (both via torch.cuda),
+    or "cpu" on CPU-only builds or when SPEAKER_DEVICE=cpu.
+    """
+    if SPEAKER_DEVICE != "cpu" and torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
 
 # Lazy-load the pipeline to avoid loading on import
 _pipeline = None
@@ -55,7 +69,7 @@ def _get_pipeline():
         from pyannote.audio import Pipeline
         import torch
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = _torch_device(torch)
         logger.info("Loading pyannote/speaker-diarization-3.1 on %s...", device)
 
         if hf_token:
@@ -325,14 +339,17 @@ def _get_emotion_model():
     _emotion_loaded = True
 
     try:
+        import torch
         from speechbrain.inference.interfaces import foreign_class
+        device = _torch_device(torch)
         _emotion_model = foreign_class(
             source="speechbrain/emotion-recognition-wav2vec2-IEMOCAP",
             pymodule_file="custom_interface.py",
             classname="CustomEncoderWav2vec2Classifier",
             savedir="/root/.cache/speechbrain_emotion",
+            run_opts={"device": str(device)},
         )
-        logger.info("SpeechBrain emotion model loaded successfully.")
+        logger.info("SpeechBrain emotion model loaded on %s.", device)
     except Exception as e:
         logger.warning("SpeechBrain emotion model unavailable: %s. Using energy fallback.", e)
         _emotion_model = None

@@ -8,24 +8,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# CPU build of the turboquant-service. NVIDIA CUDA uses Dockerfile.gpu and AMD
+# ROCm uses Dockerfile.rocm (both wired up by the compose override files).
+#
+# torch is installed from a backend wheel index chosen at build time; the
+# default is the CPU index so the base `docker compose up` pulls NO
+# nvidia-*/cuda-* packages. bitsandbytes (4-bit) and turboquant-gpu (NVIDIA
+# cuTile) are GPU-only, so they are stripped here — the service loads the model
+# in bf16/fp32 on CPU and degrades gracefully.
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 ARG TURBOQUANT_EXTRAS=""
 
-COPY requirements.txt requirements.lock* ./
+COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
-    if [ -f requirements.lock ]; then \
-      uv pip install --system \
-        --index-strategy unsafe-best-match \
-        --extra-index-url https://download.pytorch.org/whl/cpu \
-        -r requirements.lock ; \
-    else \
-      uv pip install --system \
-        --index-strategy unsafe-best-match \
-        --extra-index-url https://download.pytorch.org/whl/cpu \
-        -r requirements.txt ; \
-    fi \
+    # 1. Install torch from the selected backend index (CPU by default).
+    uv pip install --system --index-url "${TORCH_INDEX_URL}" torch \
+    # 2. Install the rest from PyPI, minus the three GPU-vendor lines.
+ && grep -ivE '^(torch|bitsandbytes|turboquant-gpu)([[:space:]<>=!~;,]|$)' requirements.txt > requirements.cpu.txt \
+ && uv pip install --system -r requirements.cpu.txt \
+ && rm -f requirements.cpu.txt \
+    # 3. Optional NVIDIA cuTile extras (only when explicitly requested).
  && if [ -n "$TURBOQUANT_EXTRAS" ]; then \
       uv pip install --system \
+        --index-strategy unsafe-best-match \
         "turboquant-gpu[$TURBOQUANT_EXTRAS]" \
         --extra-index-url https://pypi.nvidia.com ; \
     fi
