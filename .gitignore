@@ -22,6 +22,10 @@ bun.lockb
 # BlamePrompt staging (auto-generated)
 .blameprompt/
 
+# Python bytecode caches (e.g. scripts/run-native.py when run on the host)
+__pycache__/
+*.pyc
+
 # AI Backend
 services/ai-backend/.venv/
 services/ai-backend/__pycache__/
