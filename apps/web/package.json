@@ -5,7 +5,7 @@
   "packageManager": "bun@1.2.18",
   "scripts": {
     "dev": "next dev --turbopack",
-    "build": "next build",
+    "build": "content-collections build && next build",
     "start": "next start",
     "lint": "biome check src/",
     "lint:fix": "biome check src/ --write",
