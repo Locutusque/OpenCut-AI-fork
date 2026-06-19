@@ -72,6 +72,48 @@ def _safe_head_dim(model_config: Any) -> int:
     return hidden // heads
 
 
+def _maybe_compile_model(model: Any) -> Any:
+    """Optionally JIT-compile the model with torch.compile (Inductor → Triton).
+
+    Inductor lowers the transformer forward/decode pass into fused **Triton**
+    kernels, which is a sizeable speedup on GPU — and Triton has both a CUDA
+    backend (NVIDIA) and a ROCm backend (AMD, shipped as `pytorch-triton-rocm`
+    inside the torch ROCm wheels), so this accelerates the AMD path too.
+
+    Gated by the ``TURBOQUANT_COMPILE`` env var (default on; set 0/false/off to
+    disable). On GPU we require Triton to be importable; if anything fails we
+    silently keep the eager model so a compile error can never take the service
+    down. Default compile mode avoids the cudagraph/shape pitfalls that
+    "reduce-overhead" hits with variable-length autoregressive decoding.
+    """
+    flag = os.getenv("TURBOQUANT_COMPILE", "1").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return model
+
+    try:
+        device = str(next(model.parameters()).device)
+    except Exception:
+        device = str(getattr(model, "device", "cpu"))
+    on_gpu = ("cuda" in device) or ("hip" in device)
+
+    if on_gpu:
+        try:
+            import triton  # noqa: F401  (ROCm ships this as pytorch-triton-rocm)
+        except Exception:
+            logger.info("Triton not importable on %s — skipping torch.compile", device)
+            return model
+
+    try:
+        compiled = torch.compile(model)
+        logger.info(
+            "torch.compile enabled (device=%s, backend=inductor/triton)", device
+        )
+        return compiled
+    except Exception:
+        logger.warning("torch.compile failed; keeping eager model", exc_info=True)
+        return model
+
+
 # ---------------------------------------------------------------------------
 # Base interface
 # ---------------------------------------------------------------------------
@@ -392,7 +434,14 @@ class CPUTurboBackend(BaseTurboBackend):
             )
 
     def warm_up(self) -> None:
-        """Single dummy forward pass. Skip auto_tune (no cuTile to benchmark)."""
+        """Compile (Triton/Inductor) then run a dummy forward pass to trigger it.
+
+        On ROCm the model lives on the AMD GPU, so torch.compile lowers the
+        forward into Triton-ROCm kernels here. The warm-up forward pays the
+        one-time compilation cost up front so the first real request is fast.
+        Skip auto_tune (no cuTile to benchmark).
+        """
+        self.model = _maybe_compile_model(self.model)
         try:
             probe = self.tokenizer("hello", return_tensors="pt")
             input_ids = probe["input_ids"].to(self.model.device)
@@ -473,10 +522,13 @@ def create_turbo_backend(
     """Pick the right backend for the resolved device.
 
     `device` is the string resolved by `app._detect_device()` — one of
-    "cuda", "mps", or "cpu". MPS (Apple Silicon) is currently served by the
-    CPU backend because the cuTile kernel path is CUDA-only and the MPS
-    PyTorch fallback isn't meaningfully faster than CPU for the compression
-    probe. Real Apple Silicon support is a future story.
+    "cuda", "rocm", "mps", or "cpu". MPS (Apple Silicon) and ROCm (AMD) are
+    currently served by the CPU backend because the cuTile kernel path is
+    NVIDIA-only. On ROCm the model itself still lives on the AMD GPU (loaded via
+    `device_map="auto"`), so `model.generate` runs on-GPU — we just route
+    through the CPU-style backend, which never touches the missing cuTile
+    kernels and reports metrics only. Real Apple Silicon / native ROCm cuTile
+    support is a future story.
     """
     if device == "cuda":
         try:

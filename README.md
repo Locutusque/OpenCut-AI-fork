@@ -124,13 +124,60 @@ packages/             — Shared packages (env, UI)
 - [Bun](https://bun.sh/docs/installation)
 - [Docker](https://docs.docker.com/get-docker/) with BuildKit support and [Docker Compose](https://docs.docker.com/compose/install/) v2.3+
 
-**GPU setup (optional, NVIDIA only):**
+**GPU setup (optional):**
+
+NVIDIA:
 
 - NVIDIA driver installed on the host (`nvidia-smi` must work on the host first)
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) so Docker can expose the GPU to containers
 - Recommended: CUDA 13+ driver for the `cuTile` kernel path used by TurboQuant (older drivers still work — they just fall back to the PyTorch KV-compression path)
 
+AMD (ROCm):
+
+- ROCm-capable AMD GPU with the amdgpu kernel driver loaded on the host (`rocminfo` should work, and `/dev/kfd` should exist)
+- No extra container toolkit needed — the GPU is passed through via `/dev/kfd` + `/dev/dri` and the `video`/`render` groups (handled by `docker-compose.rocm.yml`)
+
 > Docker is optional but recommended for running the database, Redis, and AI backend. Frontend-only development works without it.
+
+### One-Command Install (recommended)
+
+The fastest path. This single script clones the repo (if needed), auto-detects
+your GPU (NVIDIA / AMD-ROCm / CPU), builds and starts the full Docker stack with
+the right override file, and pulls the default LLM model:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ekaanth/OpenCut-AI/main/scripts/install.sh | bash
+```
+
+Or from an existing checkout:
+
+```bash
+./scripts/install.sh
+```
+
+On **Windows**, use the PowerShell installer instead (it auto-runs the native
+GPU service for AMD cards — see [AMD ROCm on Windows](#amd-rocm-on-windows-native-gpu-service)):
+
+```powershell
+.\scripts\install.ps1
+```
+
+Useful flags:
+
+| Flag | Effect |
+|------|--------|
+| `--auto` | Auto-detect the GPU (default) |
+| `--nvidia` | Force NVIDIA mode (`docker-compose.gpu.yml`) |
+| `--rocm` | Force AMD ROCm mode (`docker-compose.rocm.yml`) |
+| `--cpu` | Force CPU-only mode |
+| `--model <name>` | Ollama model to pull (default `llama3.2:1b`) |
+| `--no-pull` | Skip pulling the default model |
+| `--dir <path>` | Clone target dir (default `./OpenCut-AI`) |
+
+When it finishes, the editor is at [http://localhost:3100](http://localhost:3100).
+Stop everything with `docker compose down` (add the same `-f` override files you
+started with). The manual steps below are still available if you'd rather drive
+each piece yourself.
 
 ### Install and Run Locally
 
@@ -181,6 +228,116 @@ packages/             — Shared packages (env, UI)
    ```
 
    If `nvidia-smi` fails on the host, install the NVIDIA driver first. If it works on the host but fails inside the container, install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) and restart the Docker daemon (`sudo systemctl restart docker`).
+
+   **Option C — AMD GPU (ROCm):**
+
+   AMD GPUs run AI compute through [ROCm](https://rocm.docs.amd.com/). The
+   [`docker-compose.rocm.yml`](docker-compose.rocm.yml) override swaps Ollama
+   for the official `ollama/ollama:rocm` image and builds the turboquant-service
+   from `Dockerfile.rocm` (PyTorch ROCm wheels), handing both the AMD GPU.
+
+   The one-command installer handles all of this for you (`./scripts/install.sh --rocm`),
+   including detecting the host `video`/`render` group ids. To run it by hand:
+
+   ```bash
+   # Make sure the host has the amdgpu/ROCm kernel driver (rocminfo should work)
+   rocminfo | head
+
+   # ROCm exposes the GPU via /dev/kfd + /dev/dri and the video/render groups
+   export VIDEO_GID=$(getent group video  | cut -d: -f3)
+   export RENDER_GID=$(getent group render | cut -d: -f3)
+
+   export DOCKER_BUILDKIT=1
+   docker compose -f docker-compose.yml -f docker-compose.rocm.yml up -d --build
+
+   # Confirm the service reports the AMD GPU
+   curl -s http://localhost:8430/health | jq '{compute_mode, gpu_vendor, rocm, gpu_available}'
+   # Expected: {"compute_mode": "rocm", "gpu_vendor": "amd", "rocm": true, "gpu_available": true}
+   ```
+
+   Some consumer cards need an architecture override so ROCm treats them as a
+   supported target — set `HSA_OVERRIDE_GFX_VERSION` in the root `.env`
+   (`10.3.0` for RDNA2 / RX 6000, `11.0.0` for RDNA3 / RX 7000). The installer
+   leaves a commented hint in `.env` for you.
+
+   **bitsandbytes 4-bit on ROCm.** bitsandbytes supports AMD GPUs via its HIP
+   backend ([ROCm 6.2+](https://huggingface.co/docs/bitsandbytes/main/en/installation#multi-backend)),
+   but the prebuilt PyPI wheel ships CUDA kernels only — so `Dockerfile.rocm`
+   compiles it from source with `-DCOMPUTE_BACKEND=hip` for your card's `gfx`
+   target. The installer reads that target from `rocminfo` and writes
+   `BNB_ROCM_ARCH` to `.env`; you can also set it by hand (e.g. `gfx1100` for the
+   RX 7900, `gfx1030` for the RX 6800/6900, `gfx90a;gfx942` for MI200/MI300).
+   The model then loads in 4-bit NF4 on the AMD GPU, same as the NVIDIA path. To
+   skip the (slow) source build and load fp16 instead, set `BUILD_BNB=0` in
+   `.env`.
+
+   **Triton + bf16.** The service compiles the model with `torch.compile`, which
+   lowers the forward/decode pass into fused **Triton** kernels — Triton has a
+   ROCm backend (`pytorch-triton-rocm`, bundled in the torch ROCm wheels), so
+   the AMD path gets the speedup too. Toggle it with `TURBOQUANT_COMPILE` in
+   `.env` (default `1`; set `0` to skip the one-time compile latency). Models
+   load in **bfloat16** rather than float16 — same memory, wider dynamic range,
+   and the native fast path on RDNA3 / CDNA (it auto-falls back to fp16 on cards
+   without bf16 support). If you run the service **natively on Windows** instead
+   of in the Linux container, install the ROCm-capable Triton build from
+   [`woct0rdho/triton-windows`](https://github.com/woct0rdho/triton-windows).
+
+   > **What stays NVIDIA-only:** the TurboQuant cuTile fused KV-compression
+   > kernels (`turboquant-gpu`). On ROCm the model runs on-GPU through the
+   > metrics-only turbo backend — you keep GPU inference, 4-bit weights, bf16,
+   > and Triton-compiled kernels; you just don't get the cuTile fused-kernel KV
+   > compression.
+
+#### AMD ROCm on Windows (native GPU service)
+
+Docker **cannot pass an AMD GPU through to containers on Windows** (and ROCm in
+WSL2 is unsupported for most consumer Radeon cards). So on Windows the GPU-bound
+turboquant-service runs **natively on the host**, while the rest of the stack
+(Postgres, Redis, Ollama, web, other AI services) stays in Docker. The cross-
+platform launcher [`scripts/run-native.py`](scripts/run-native.py) handles the
+native service — it's pure Python, so the **same script also works on Linux and
+macOS**.
+
+The one-command Windows installer does all of the below for you — it starts the
+Docker stack and launches the native GPU service in a new window:
+
+```powershell
+.\scripts\install.ps1
+```
+
+(It auto-detects an AMD GPU; force it with `-Rocm`, or use `-NoNativeLaunch` to
+set up without auto-starting the GPU service.) To do it by hand instead:
+
+1. Install PyTorch for ROCm on Windows per AMD's guide:
+   [Install PyTorch for Radeon/Ryzen on Windows](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html).
+   The launcher will install Triton ([`triton-windows`](https://github.com/woct0rdho/triton-windows),
+   the ROCm-capable Windows build) and the service deps for you.
+
+2. Start the supporting stack in Docker with the GPU container scaled to zero:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.native-ai.yml \
+     up -d --build --scale turboquant-service=0
+   ```
+
+3. Run the GPU service natively (in a second terminal):
+
+   ```powershell
+   python scripts\run-native.py
+   ```
+
+   It serves on `http://localhost:8430`, and `docker-compose.native-ai.yml`
+   already repoints the Dockerised ai-backend at it via `host.docker.internal`.
+
+On Linux/macOS the one-command installer wires all of this together:
+
+```bash
+./scripts/install.sh --native-turboquant
+```
+
+> Ollama's container also can't reach an AMD GPU on Windows — for GPU-accelerated
+> LLMs there, install [Ollama for Windows](https://ollama.com/download) natively
+> (it has its own ROCm support) and point `OPENCUTAI_OLLAMA_URL` at it.
 
 4. Install dependencies and start the dev server:
 
