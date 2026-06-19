@@ -155,6 +155,13 @@ Or from an existing checkout:
 ./scripts/install.sh
 ```
 
+On **Windows**, use the PowerShell installer instead (it auto-runs the native
+GPU service for AMD cards — see [AMD ROCm on Windows](#amd-rocm-on-windows-native-gpu-service)):
+
+```powershell
+.\scripts\install.ps1
+```
+
 Useful flags:
 
 | Flag | Effect |
@@ -290,6 +297,16 @@ turboquant-service runs **natively on the host**, while the rest of the stack
 platform launcher [`scripts/run-native.py`](scripts/run-native.py) handles the
 native service — it's pure Python, so the **same script also works on Linux and
 macOS**.
+
+The one-command Windows installer does all of the below for you — it starts the
+Docker stack and launches the native GPU service in a new window:
+
+```powershell
+.\scripts\install.ps1
+```
+
+(It auto-detects an AMD GPU; force it with `-Rocm`, or use `-NoNativeLaunch` to
+set up without auto-starting the GPU service.) To do it by hand instead:
 
 1. Install PyTorch for ROCm on Windows per AMD's guide:
    [Install PyTorch for Radeon/Ryzen on Windows](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html).
