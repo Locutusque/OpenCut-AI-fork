@@ -12,13 +12,14 @@ WORKDIR /app
 # The PyTorch build is chosen at build time so a single Dockerfile serves CPU,
 # NVIDIA CUDA and AMD ROCm. The default is the CPU wheel index, which pulls NO
 # nvidia-*/cuda-* packages — a plain `docker compose up` stays completely
-# CUDA-free. The GPU/ROCm compose overrides set TORCH_INDEX_URL to the CUDA or
-# ROCm wheel index instead:
+# CUDA-free. torch is pinned to the 2.9 series (~=2.9.0) so every backend matches
+# the AMD Windows ROCm wheels (torch 2.9.1). The GPU/ROCm compose overrides set
+# TORCH_INDEX_URL to the CUDA or ROCm wheel index instead:
 #   CPU   : https://download.pytorch.org/whl/cpu       (default)
 #   CUDA  : https://download.pytorch.org/whl/cu128      (docker-compose.gpu.yml)
-#   ROCm  : https://download.pytorch.org/whl/rocm6.2    (docker-compose.rocm.yml, Linux containers)
+#   ROCm  : https://download.pytorch.org/whl/rocm6.4    (docker-compose.rocm.yml, Linux containers)
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
-ARG TORCH_PACKAGES="torch"
+ARG TORCH_PACKAGES="torch~=2.9.0"
 
 COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/uv \

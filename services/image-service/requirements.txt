@@ -3,7 +3,10 @@ uvicorn[standard]==0.30.0
 python-multipart==0.0.9
 aiofiles==24.1.0
 Pillow>=10.0.0
-torch>=2.1.0
+# torch is installed from a backend-specific wheel index (CPU/CUDA/ROCm) by the
+# Dockerfile / run-native.py, pinned to the 2.9 series; this line is stripped
+# before the PyPI install (documentation of the expected version).
+torch~=2.9.0
 diffusers>=0.30.0
 transformers>=4.40.0
 accelerate>=0.30.0

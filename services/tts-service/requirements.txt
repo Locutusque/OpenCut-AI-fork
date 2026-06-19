@@ -2,5 +2,13 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.0
 python-multipart==0.0.9
 aiofiles==24.1.0
-torch>=2.1.0,<2.6.0
-coqui-tts==0.24.2
+# torch/torchaudio are installed from a backend-specific wheel index by the
+# Dockerfile / run-native.py (CPU, CUDA cu128, or ROCm), pinned to the 2.9
+# series so every backend matches the AMD Windows ROCm wheels (torch 2.9.1).
+# These lines are documentation — they're stripped before the PyPI install.
+torch~=2.9.0
+torchaudio~=2.9.0
+# coqui-tts 0.27.4+ no longer bundles torch (we provide 2.9 ourselves) and
+# supports torch>=2.2, so it works on torch 2.9. torchcodec is installed
+# alongside (best-effort) for torch 2.9 audio decoding.
+coqui-tts==0.27.5

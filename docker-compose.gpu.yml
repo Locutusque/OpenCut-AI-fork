@@ -38,6 +38,7 @@ services:
       context: ./services/turboquant-service
       dockerfile: Dockerfile.gpu
       args:
+        TORCH_INDEX_URL: ${CUDA_TORCH_INDEX:-https://download.pytorch.org/whl/cu128}
         TURBOQUANT_EXTRAS: gpu
     environment:
       - DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-cuda}
@@ -47,7 +48,7 @@ services:
     build:
       args:
         TORCH_INDEX_URL: ${CUDA_TORCH_INDEX:-https://download.pytorch.org/whl/cu128}
-        TORCH_PACKAGES: torch
+        TORCH_PACKAGES: torch~=2.9.0
     environment:
       - IMAGE_DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-auto}
     deploy: *nvidia-gpu
@@ -55,9 +56,9 @@ services:
   tts-service:
     build:
       args:
-        # coqui-tts needs torch<2.6, which cu128 doesn't ship — use cu124 here.
-        TORCH_INDEX_URL: ${TTS_CUDA_TORCH_INDEX:-https://download.pytorch.org/whl/cu124}
-        TORCH_PACKAGES: torch==2.5.1 torchaudio==2.5.1
+        # cu128 ships torch 2.9; coqui-tts 0.27.x supports it (no torch<2.6 cap).
+        TORCH_INDEX_URL: ${CUDA_TORCH_INDEX:-https://download.pytorch.org/whl/cu128}
+        TORCH_PACKAGES: torch~=2.9.0 torchaudio~=2.9.0
     environment:
       - TTS_DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-auto}
     deploy: *nvidia-gpu
@@ -66,7 +67,7 @@ services:
     build:
       args:
         TORCH_INDEX_URL: ${CUDA_TORCH_INDEX:-https://download.pytorch.org/whl/cu128}
-        TORCH_PACKAGES: torch torchaudio
+        TORCH_PACKAGES: torch~=2.9.0 torchaudio~=2.9.0
     environment:
       - SPEAKER_DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-auto}
     deploy: *nvidia-gpu

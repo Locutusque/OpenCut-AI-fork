@@ -26,8 +26,9 @@
 # override so ROCm treats them as a supported gfx target — set
 # HSA_OVERRIDE_GFX_VERSION in .env (e.g. 10.3.0 for RDNA2, 11.0.0 for RDNA3).
 #
-# The ROCm torch wheel index defaults to rocm6.2; override with ROCM_TORCH_INDEX
-# to match your installed ROCm series (e.g. .../whl/rocm6.3).
+# The ROCm torch wheel index defaults to rocm6.4 (ships torch 2.9, matching the
+# CPU/CUDA and AMD Windows ROCm builds); override ROCM_TORCH_INDEX +
+# ROCM_BASE_IMAGE together to match a different installed ROCm series.
 #
 # NOTE: whisper-service (CTranslate2) and face-service (MediaPipe) do not use
 # PyTorch and have no ROCm path, so they stay on CPU here — that's expected.
@@ -59,8 +60,8 @@ services:
         # Pin these to your ROCm series + GPU. scripts/install.sh detects the
         # gfx target from rocminfo and writes BNB_ROCM_ARCH to .env so
         # bitsandbytes is compiled with HIP for your exact card.
-        BASE_IMAGE: ${ROCM_BASE_IMAGE:-rocm/dev-ubuntu-22.04:6.2-complete}
-        ROCM_INDEX: ${ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.2}
+        BASE_IMAGE: ${ROCM_BASE_IMAGE:-rocm/dev-ubuntu-22.04:6.4-complete}
+        ROCM_INDEX: ${ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.4}
         BNB_ROCM_ARCH: ${BNB_ROCM_ARCH:-gfx1030;gfx1100;gfx1101;gfx90a;gfx942}
         BUILD_BNB: ${BUILD_BNB:-1}
     <<: *amd-gpu
@@ -75,8 +76,8 @@ services:
   image-service:
     build:
       args:
-        TORCH_INDEX_URL: ${ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.2}
-        TORCH_PACKAGES: torch
+        TORCH_INDEX_URL: ${ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.4}
+        TORCH_PACKAGES: torch~=2.9.0
     <<: *amd-gpu
     environment:
       - IMAGE_DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-auto}
@@ -86,9 +87,9 @@ services:
   tts-service:
     build:
       args:
-        # rocm6.2 ships torch 2.5.1, which satisfies coqui-tts's torch<2.6 cap.
-        TORCH_INDEX_URL: ${ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.2}
-        TORCH_PACKAGES: torch==2.5.1 torchaudio==2.5.1
+        # rocm6.4 ships torch 2.9; coqui-tts 0.27.x supports it (no torch<2.6 cap).
+        TORCH_INDEX_URL: ${ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.4}
+        TORCH_PACKAGES: torch~=2.9.0 torchaudio~=2.9.0
     <<: *amd-gpu
     environment:
       - TTS_DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-auto}
@@ -98,8 +99,8 @@ services:
   speaker-service:
     build:
       args:
-        TORCH_INDEX_URL: ${ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.2}
-        TORCH_PACKAGES: torch torchaudio
+        TORCH_INDEX_URL: ${ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.4}
+        TORCH_PACKAGES: torch~=2.9.0 torchaudio~=2.9.0
     <<: *amd-gpu
     environment:
       - SPEAKER_DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-auto}

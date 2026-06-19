@@ -12,12 +12,13 @@ WORKDIR /app
 # Chosen at build time so one Dockerfile serves CPU, NVIDIA CUDA and AMD ROCm.
 # Default = CPU wheel index (no nvidia-*/cuda-* packages). pyannote.audio and
 # speechbrain depend on torch + torchaudio, so both come from the selected
-# backend index. The GPU/ROCm compose overrides set TORCH_INDEX_URL.
+# backend index, pinned to the 2.9 series (~=2.9.0) to match the AMD Windows
+# ROCm wheels (torch 2.9.1). The GPU/ROCm compose overrides set TORCH_INDEX_URL.
 #   CPU   : https://download.pytorch.org/whl/cpu       (default)
 #   CUDA  : https://download.pytorch.org/whl/cu128      (docker-compose.gpu.yml)
-#   ROCm  : https://download.pytorch.org/whl/rocm6.2    (docker-compose.rocm.yml, Linux containers)
+#   ROCm  : https://download.pytorch.org/whl/rocm6.4    (docker-compose.rocm.yml, Linux containers)
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
-ARG TORCH_PACKAGES="torch torchaudio"
+ARG TORCH_PACKAGES="torch~=2.9.0 torchaudio~=2.9.0"
 
 COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/uv \

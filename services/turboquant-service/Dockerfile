@@ -13,17 +13,19 @@ WORKDIR /app
 #
 # torch is installed from a backend wheel index chosen at build time; the
 # default is the CPU index so the base `docker compose up` pulls NO
-# nvidia-*/cuda-* packages. bitsandbytes (4-bit) and turboquant-gpu (NVIDIA
-# cuTile) are GPU-only, so they are stripped here — the service loads the model
-# in bf16/fp32 on CPU and degrades gracefully.
+# nvidia-*/cuda-* packages. Pinned to the 2.9 series (~=2.9.0) to match the AMD
+# Windows ROCm wheels (torch 2.9.1). bitsandbytes (4-bit) and turboquant-gpu
+# (NVIDIA cuTile) are GPU-only, so they are stripped here — the service loads
+# the model in bf16/fp32 on CPU and degrades gracefully.
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+ARG TORCH_PACKAGES="torch~=2.9.0"
 ARG TURBOQUANT_EXTRAS=""
 
 COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
     # 1. Install torch from the selected backend index (CPU by default).
-    uv pip install --system --index-url "${TORCH_INDEX_URL}" torch \
+    uv pip install --system --index-url "${TORCH_INDEX_URL}" ${TORCH_PACKAGES} \
     # 2. Install the rest from PyPI, minus the three GPU-vendor lines.
  && grep -ivE '^(torch|bitsandbytes|turboquant-gpu)([[:space:]<>=!~;,]|$)' requirements.txt > requirements.cpu.txt \
  && uv pip install --system -r requirements.cpu.txt \

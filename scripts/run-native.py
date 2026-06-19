@@ -55,46 +55,53 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # from PyPI). `skip` is the prefixes stripped from requirements.txt before the
 # PyPI install, because they're installed separately (torch) or are GPU-vendor
 # specific (bitsandbytes = 4-bit CUDA/HIP, turboquant-gpu = NVIDIA cuTile).
+# torch is pinned to the 2.9 series (~=2.9.0) so every backend matches the AMD
+# Windows ROCm wheels (torch 2.9.1). `wants_codec` adds torchcodec (best-effort)
+# for coqui-tts 0.27.x audio decoding on torch 2.9.
 SERVICES: dict[str, dict] = {
     "turboquant": {
         "dir": "services/turboquant-service",
         "port": "8430",
-        "torch": ["torch"],
+        "torch": ["torch~=2.9.0"],
         "skip": ("torch", "bitsandbytes", "turboquant-gpu"),
         "wants_triton": True,
         "wants_bnb": True,
+        "wants_codec": False,
     },
     "image": {
         "dir": "services/image-service",
         "port": "8423",
-        "torch": ["torch"],
-        "skip": ("torch", "torchaudio", "torchvision"),
+        "torch": ["torch~=2.9.0"],
+        "skip": ("torch", "torchaudio", "torchvision", "torchcodec"),
         "wants_triton": False,
         "wants_bnb": False,
+        "wants_codec": False,
     },
     "tts": {
         "dir": "services/tts-service",
-        # coqui-tts 0.24.2 requires torch<2.6; pin 2.5.1 (on cpu/cu124/rocm6.2).
         "port": "8422",
-        "torch": ["torch==2.5.1", "torchaudio==2.5.1"],
-        "skip": ("torch", "torchaudio", "torchvision"),
+        "torch": ["torch~=2.9.0", "torchaudio~=2.9.0"],
+        "skip": ("torch", "torchaudio", "torchvision", "torchcodec"),
         "wants_triton": False,
         "wants_bnb": False,
+        "wants_codec": True,
     },
     "speaker": {
         "dir": "services/speaker-service",
         "port": "8424",
-        "torch": ["torch", "torchaudio"],
-        "skip": ("torch", "torchaudio", "torchvision"),
+        "torch": ["torch~=2.9.0", "torchaudio~=2.9.0"],
+        "skip": ("torch", "torchaudio", "torchvision", "torchcodec"),
         "wants_triton": False,
         "wants_bnb": False,
+        "wants_codec": False,
     },
 }
 
-# Default PyTorch ROCm wheel index for Linux. Windows ROCm wheels are NOT on
-# download.pytorch.org — Windows users install torch via AMD's Radeon wheels
-# (repo.radeon.com), passed with --torch-wheel / ROCM_WINDOWS_TORCH_WHEELS.
-DEFAULT_LINUX_TORCH_INDEX = "https://download.pytorch.org/whl/rocm6.2"
+# Default PyTorch ROCm wheel index for Linux (rocm6.4 → torch 2.9). Windows ROCm
+# wheels are NOT on download.pytorch.org — Windows users install torch 2.9.1 via
+# AMD's Radeon wheels (repo.radeon.com), passed with --torch-wheel /
+# ROCM_WINDOWS_TORCH_WHEELS.
+DEFAULT_LINUX_TORCH_INDEX = "https://download.pytorch.org/whl/rocm6.4"
 
 # torch's own runtime deps — pip --no-deps (used for the Windows ROCm wheels, per
 # AMD's guide) skips these, so we install them explicitly afterwards.
@@ -186,6 +193,16 @@ def install(py: Path, svc: dict, service_dir: Path, torch_index: str | None,
 
     # --- PyTorch -----------------------------------------------------------
     install_torch(py, svc, torch_index, torch_wheels)
+
+    # --- torchcodec (tts on torch 2.9, best-effort) ------------------------
+    # coqui-tts >=0.27.4 decodes audio via torchcodec on torch 2.9. --no-deps so
+    # it can't pull a CPU torch over the backend build; non-fatal if unavailable
+    # (coqui-tts falls back to soundfile).
+    if svc.get("wants_codec"):
+        try:
+            run([str(py), "-m", "pip", "install", "--no-deps", "torchcodec>=0.8.0"])
+        except subprocess.CalledProcessError:
+            log("torchcodec unavailable for this backend — coqui-tts falls back to soundfile.")
 
     # --- Triton (turboquant torch.compile path only) -----------------------
     if svc.get("wants_triton"):
