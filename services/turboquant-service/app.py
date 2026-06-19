@@ -484,39 +484,49 @@ class ModelManager:
 
         quantization = "fp32"
 
+        dtype = _preferred_dtype(device)
+        dtype_name = "bf16" if dtype == torch.bfloat16 else "fp16"
+
         if device in ("cuda", "rocm"):
             # NVIDIA (cuda) and AMD (rocm) both drive the GPU through torch.cuda.
             # bitsandbytes 4-bit NF4 works on both: NVIDIA via its CUDA kernels,
             # AMD via the HIP backend (the rocm image builds bitsandbytes from
             # source with COMPUTE_BACKEND=hip). If bitsandbytes is missing or its
-            # GPU kernels can't initialize, we degrade to plain fp16 on-GPU.
-            load_kwargs["torch_dtype"] = torch.float16
+            # GPU kernels can't initialize, we degrade to plain bf16/fp16 on-GPU.
+            load_kwargs["torch_dtype"] = dtype
             load_kwargs["device_map"] = "auto"
-            quantization = "fp16"
+            quantization = dtype_name
             try:
                 from transformers import BitsAndBytesConfig
                 load_kwargs["quantization_config"] = BitsAndBytesConfig(
                     load_in_4bit=True,
-                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_compute_dtype=dtype,
                     bnb_4bit_use_double_quant=True,
                     bnb_4bit_quant_type="nf4",
                 )
-                quantization = "4bit-nf4"
-                logger.info("Using bitsandbytes 4-bit quantization (%s)", device)
+                quantization = f"4bit-nf4-{dtype_name}"
+                logger.info(
+                    "Using bitsandbytes 4-bit quantization (%s, compute=%s)",
+                    device,
+                    dtype_name,
+                )
             except Exception:
                 load_kwargs.pop("quantization_config", None)
                 logger.warning(
-                    "bitsandbytes 4-bit unavailable on %s — loading in fp16", device
+                    "bitsandbytes 4-bit unavailable on %s — loading in %s",
+                    device,
+                    dtype_name,
                 )
         elif device == "mps":
-            load_kwargs["torch_dtype"] = torch.float16
+            load_kwargs["torch_dtype"] = dtype
             load_kwargs["device_map"] = {"": "mps"}
-            quantization = "fp16"
+            quantization = dtype_name
         else:
-            # Use float16 on CPU to halve memory usage (float32 OOMs in containers)
-            load_kwargs["torch_dtype"] = torch.float16
+            # bf16 halves memory vs fp32 (float32 OOMs in containers) and is more
+            # numerically stable than fp16 for CPU inference.
+            load_kwargs["torch_dtype"] = dtype
             load_kwargs["device_map"] = "cpu"
-            quantization = "fp16"
+            quantization = dtype_name
 
         model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
 
@@ -670,6 +680,26 @@ def _is_rocm() -> bool:
 def _gpu_device() -> str:
     """Resolve the CUDA-API GPU to its concrete label: 'rocm' on AMD, else 'cuda'."""
     return "rocm" if _is_rocm() else "cuda"
+
+
+def _preferred_dtype(device: str) -> torch.dtype:
+    """Prefer bfloat16 over float16.
+
+    bf16 has the same 2-byte footprint as fp16 but a much wider dynamic range
+    (the fp32 exponent), so it avoids the overflow/NaN issues fp16 hits on long
+    contexts — and it's the native fast path on modern AMD (CDNA, RDNA3) and
+    NVIDIA (Ampere+) GPUs. We only fall back to fp16 when the GPU genuinely
+    can't do bf16 (pre-Ampere NVIDIA, some older Radeon parts).
+    """
+    if device in ("cuda", "rocm"):
+        try:
+            if torch.cuda.is_bf16_supported():
+                return torch.bfloat16
+        except Exception:
+            pass
+        return torch.float16
+    # CPU / MPS: bf16 is well supported in recent torch and the same size as fp16.
+    return torch.bfloat16
 
 
 def _detect_device() -> str:

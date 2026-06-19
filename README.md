@@ -264,10 +264,22 @@ each piece yourself.
    skip the (slow) source build and load fp16 instead, set `BUILD_BNB=0` in
    `.env`.
 
+   **Triton + bf16.** The service compiles the model with `torch.compile`, which
+   lowers the forward/decode pass into fused **Triton** kernels — Triton has a
+   ROCm backend (`pytorch-triton-rocm`, bundled in the torch ROCm wheels), so
+   the AMD path gets the speedup too. Toggle it with `TURBOQUANT_COMPILE` in
+   `.env` (default `1`; set `0` to skip the one-time compile latency). Models
+   load in **bfloat16** rather than float16 — same memory, wider dynamic range,
+   and the native fast path on RDNA3 / CDNA (it auto-falls back to fp16 on cards
+   without bf16 support). If you run the service **natively on Windows** instead
+   of in the Linux container, install the ROCm-capable Triton build from
+   [`woct0rdho/triton-windows`](https://github.com/woct0rdho/triton-windows).
+
    > **What stays NVIDIA-only:** the TurboQuant cuTile fused KV-compression
    > kernels (`turboquant-gpu`). On ROCm the model runs on-GPU through the
-   > metrics-only turbo backend — you keep GPU inference and 4-bit weights, you
-   > just don't get the fused-kernel KV compression.
+   > metrics-only turbo backend — you keep GPU inference, 4-bit weights, bf16,
+   > and Triton-compiled kernels; you just don't get the cuTile fused-kernel KV
+   > compression.
 
 4. Install dependencies and start the dev server:
 

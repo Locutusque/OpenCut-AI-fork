@@ -59,3 +59,6 @@ services:
       - DEVICE=${OPENCUTAI_AI_COMPUTE_MODE:-rocm}
       - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}
       - ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-}
+      # torch.compile → Triton-ROCm kernels for faster inference. Set to 0 to
+      # disable (e.g. to skip the one-time compile latency on first request).
+      - TURBOQUANT_COMPILE=${TURBOQUANT_COMPILE:-1}
