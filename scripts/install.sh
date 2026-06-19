@@ -20,6 +20,11 @@
 #   --auto           Auto-detect GPU (default)
 #   --model <name>   Ollama model to pull (default: llama3.2:1b)
 #   --no-pull        Skip pulling the default Ollama model
+#   --native-turboquant
+#                    Run the GPU service natively on the host (via
+#                    scripts/run-native.py) and keep the rest in Docker.
+#                    Required for AMD ROCm on Windows, where Docker has no GPU
+#                    passthrough. Works on Linux/macOS too.
 #   --dir <path>     Where to clone the repo (default: ./OpenCut-AI)
 #   --repo <url>     Git URL to clone (default: upstream OpenCut-AI)
 #   -h, --help       Show this help
@@ -31,6 +36,7 @@ REPO_URL="${OPENCUT_REPO_URL:-https://github.com/Ekaanth/OpenCut-AI.git}"
 CLONE_DIR="${OPENCUT_DIR:-OpenCut-AI}"
 DEFAULT_MODEL="llama3.2:1b"
 GPU_MODE="auto"          # auto | cpu | nvidia | rocm
+NATIVE_TQ=0              # run turboquant-service natively on the host GPU
 DO_PULL=1
 MAX_RETRIES=30
 RETRY_INTERVAL=5
@@ -53,6 +59,7 @@ while [ $# -gt 0 ]; do
         --auto)    GPU_MODE="auto" ;;
         --model)   DEFAULT_MODEL="${2:?--model needs a value}"; shift ;;
         --no-pull) DO_PULL=0 ;;
+        --native-turboquant) NATIVE_TQ=1 ;;
         --dir)     CLONE_DIR="${2:?--dir needs a value}"; shift ;;
         --repo)    REPO_URL="${2:?--repo needs a value}"; shift ;;
         -h|--help) usage ;;
@@ -193,11 +200,25 @@ case "$GPU_MODE" in
         log_error "Unknown GPU mode: $GPU_MODE"; exit 1 ;;
 esac
 
+# --- Native turboquant: GPU service on the host, rest in Docker -------------
+# Needed when Docker can't reach the GPU (AMD ROCm on Windows). We drop the
+# in-container turboquant overrides, scale that container to zero, and repoint
+# the ai-backend at the host via docker-compose.native-ai.yml.
+UP_EXTRA=()
+if [ "$NATIVE_TQ" -eq 1 ]; then
+    if [ ! -f docker-compose.native-ai.yml ]; then
+        log_error "docker-compose.native-ai.yml missing — cannot run native turboquant mode."; exit 1
+    fi
+    COMPOSE_FILES=(-f docker-compose.yml -f docker-compose.native-ai.yml)
+    UP_EXTRA=(--scale turboquant-service=0)
+    log_step "Native turboquant mode: GPU service runs on the host, supporting stack in Docker."
+fi
+
 # --- Build + start ----------------------------------------------------------
 log_step "Building and starting the stack (this can take a while on first run)"
 export DOCKER_BUILDKIT=1
 # Persist the chosen model for the ai-backend default too.
-docker compose "${COMPOSE_FILES[@]}" up -d --build
+docker compose "${COMPOSE_FILES[@]}" up -d --build ${UP_EXTRA[@]+"${UP_EXTRA[@]}"}
 
 # --- Wait for Ollama --------------------------------------------------------
 log_step "Waiting for Ollama to come online"
@@ -228,10 +249,25 @@ log_step "Service status"
 docker compose "${COMPOSE_FILES[@]}" ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}" || true
 
 echo ""
-log_info "OpenCut AI is up. Compute mode: ${GPU_MODE}"
+NATIVE_LABEL=""; [ "$NATIVE_TQ" -eq 1 ] && NATIVE_LABEL=" (turboquant native)"
+log_info "OpenCut AI is up. Compute mode: ${GPU_MODE}${NATIVE_LABEL}"
 log_info "Web App:     http://localhost:3100"
 log_info "AI Backend:  http://localhost:8420"
 log_info "Ollama API:  ${OLLAMA_URL}"
+
+if [ "$NATIVE_TQ" -eq 1 ]; then
+    PYBIN="$(command -v python3 || command -v python || true)"
+    echo ""
+    log_step "Final step: start the GPU service on the host"
+    log_info "The turboquant container is scaled to 0; run it natively so it can use your GPU:"
+    log_info "  ${PYBIN:-python} scripts/run-native.py"
+    log_info "On Windows (PowerShell/cmd):  python scripts\\run-native.py"
+    log_info "It serves on http://localhost:8430 and the Dockerised ai-backend already points at it."
+    echo ""
+    log_info "Stop the Docker part with: docker compose ${COMPOSE_FILES[*]} down"
+    exit 0
+fi
+
 if [ "$GPU_MODE" = "rocm" ]; then
     echo ""
     log_info "Verify the AMD GPU was picked up:"

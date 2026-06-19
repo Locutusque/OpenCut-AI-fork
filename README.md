@@ -281,6 +281,47 @@ each piece yourself.
    > and Triton-compiled kernels; you just don't get the cuTile fused-kernel KV
    > compression.
 
+#### AMD ROCm on Windows (native GPU service)
+
+Docker **cannot pass an AMD GPU through to containers on Windows** (and ROCm in
+WSL2 is unsupported for most consumer Radeon cards). So on Windows the GPU-bound
+turboquant-service runs **natively on the host**, while the rest of the stack
+(Postgres, Redis, Ollama, web, other AI services) stays in Docker. The cross-
+platform launcher [`scripts/run-native.py`](scripts/run-native.py) handles the
+native service — it's pure Python, so the **same script also works on Linux and
+macOS**.
+
+1. Install PyTorch for ROCm on Windows per AMD's guide:
+   [Install PyTorch for Radeon/Ryzen on Windows](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html).
+   The launcher will install Triton ([`triton-windows`](https://github.com/woct0rdho/triton-windows),
+   the ROCm-capable Windows build) and the service deps for you.
+
+2. Start the supporting stack in Docker with the GPU container scaled to zero:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.native-ai.yml \
+     up -d --build --scale turboquant-service=0
+   ```
+
+3. Run the GPU service natively (in a second terminal):
+
+   ```powershell
+   python scripts\run-native.py
+   ```
+
+   It serves on `http://localhost:8430`, and `docker-compose.native-ai.yml`
+   already repoints the Dockerised ai-backend at it via `host.docker.internal`.
+
+On Linux/macOS the one-command installer wires all of this together:
+
+```bash
+./scripts/install.sh --native-turboquant
+```
+
+> Ollama's container also can't reach an AMD GPU on Windows — for GPU-accelerated
+> LLMs there, install [Ollama for Windows](https://ollama.com/download) natively
+> (it has its own ROCm support) and point `OPENCUTAI_OLLAMA_URL` at it.
+
 4. Install dependencies and start the dev server:
 
    ```bash

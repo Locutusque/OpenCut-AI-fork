@@ -1,0 +1,26 @@
+# Override for running turboquant-service NATIVELY on the host GPU while the
+# rest of the stack stays in Docker.
+#
+# Use this when Docker can't reach your GPU — most importantly AMD ROCm on
+# Windows, where there is no container GPU passthrough. The GPU service runs via
+# `python scripts/run-native.py`; this file just repoints the Dockerised
+# ai-backend at it on the host.
+#
+# Start the supporting stack with the turboquant container scaled to zero:
+#   docker compose -f docker-compose.yml -f docker-compose.native-ai.yml \
+#     up -d --build --scale turboquant-service=0
+# then, in a second terminal, run the GPU service on the host:
+#   python scripts/run-native.py
+#
+# scripts/install.sh --native-turboquant wires both steps together on
+# Linux/macOS/Git-Bash.
+#
+# `host.docker.internal` resolves automatically on Docker Desktop (Windows/Mac);
+# the extra_hosts line below makes it resolve on Linux Docker Engine too, so the
+# same file works everywhere.
+services:
+  ai-backend:
+    environment:
+      - OPENCUTAI_TURBOQUANT_SERVICE_URL=http://host.docker.internal:8430
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
