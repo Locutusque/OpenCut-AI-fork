@@ -11,5 +11,15 @@ torchaudio~=2.9.0
 # which can't be satisfied against the ROCm/CUDA torch 2.9 builds we install and
 # makes pip's resolver bail with ResolutionImpossible. The 3.x line only needs
 # torch>=2.0, so cap below 4 to keep it compatible with torch 2.9.
-pyannote.audio>=3.1.0,<4
+#
+# The floors below are also raised deliberately. pyannote.audio pulls a very deep
+# tree (lightning, optuna, torch-audiomentations, pyannote.* sub-packages), and
+# the pinned +rocm torch isn't on any index for pip to prune against -- with
+# wide-open floors the resolver backtracks across years of releases until it
+# bails (it surfaces as a misleading "cannot install uvicorn / ResolutionImpossible"
+# as it unwinds the whole graph). Raising the floors to the recent versions pip
+# already selects (pyannote.audio 3.4.x, speechbrain 1.1.x) caps the depth, and an
+# explicit huggingface_hub floor stops it walking that package's long history.
+pyannote.audio>=3.4.0,<4
 speechbrain>=1.0.0
+huggingface_hub>=0.34.0
