@@ -755,7 +755,7 @@ def _memory_info() -> dict:
         info["gpu_allocated_mb"] = round(torch.cuda.memory_allocated(device) / 1024 / 1024, 1)
         info["gpu_reserved_mb"] = round(torch.cuda.memory_reserved(device) / 1024 / 1024, 1)
         info["gpu_total_mb"] = round(
-            torch.cuda.get_device_properties(device).total_mem / 1024 / 1024, 1
+            torch.cuda.get_device_properties(device).total_memory / 1024 / 1024, 1
         )
     try:
         import psutil
