@@ -39,6 +39,14 @@ services:
     build:
       context: ./services/turboquant-service
       dockerfile: Dockerfile.rocm
+      args:
+        # Pin these to your ROCm series + GPU. scripts/install.sh detects the
+        # gfx target from rocminfo and writes BNB_ROCM_ARCH to .env so
+        # bitsandbytes is compiled with HIP for your exact card.
+        BASE_IMAGE: ${ROCM_BASE_IMAGE:-rocm/dev-ubuntu-22.04:6.2-complete}
+        ROCM_INDEX: ${ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.2}
+        BNB_ROCM_ARCH: ${BNB_ROCM_ARCH:-gfx1030;gfx1100;gfx1101;gfx90a;gfx942}
+        BUILD_BNB: ${BUILD_BNB:-1}
     devices:
       - /dev/kfd
       - /dev/dri

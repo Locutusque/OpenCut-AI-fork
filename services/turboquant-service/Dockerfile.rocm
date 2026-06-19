@@ -1,44 +1,67 @@
 # ROCm (AMD GPU) build of the turboquant-service.
 #
-# Installs the PyTorch ROCm wheels instead of the CPU/CUDA ones. AMD GPUs are
-# driven through the same `torch.cuda` API as NVIDIA (HIP under the hood), so
-# `app.py` loads the model straight onto the GPU. The NVIDIA-only cuTile
-# kernels (`turboquant-gpu[gpu]`) are intentionally NOT installed here — on
-# ROCm the service runs the metrics-only turbo backend with the model on-GPU.
+# Unlike the CPU/CUDA images this is based on AMD's ROCm dev image, because we
+# build bitsandbytes from source against the HIP backend (the prebuilt PyPI
+# wheel ships CUDA kernels only). That gives AMD GPUs the same 4-bit NF4
+# quantization path NVIDIA gets — see https://huggingface.co/docs/bitsandbytes
+# and https://rocm.docs.amd.com.
 #
-# Built automatically by docker-compose.rocm.yml. Override the ROCm version
-# with the ROCM_INDEX build arg if your driver needs a different wheel index.
-FROM python:3.11-slim
+# AMD GPUs are driven through the same `torch.cuda` API as NVIDIA (HIP under the
+# hood), so `app.py` loads the model straight onto the GPU. The NVIDIA-only
+# cuTile kernels (`turboquant-gpu`) are NOT installed here — on ROCm the service
+# runs the metrics-only turbo backend with the (optionally 4-bit) model on-GPU.
+#
+# Built by docker-compose.rocm.yml. Key build args:
+#   BASE_IMAGE      ROCm dev base (must include hipcc + ROCm libs).
+#   ROCM_INDEX      PyTorch ROCm wheel index, matched to the base ROCm series.
+#   BNB_ROCM_ARCH   ;-separated gfx targets to compile bitsandbytes for, e.g.
+#                   "gfx1100" (RX 7900), "gfx1030" (RX 6800/6900),
+#                   "gfx90a;gfx942" (MI200/MI300). scripts/install.sh auto-fills
+#                   this from `rocminfo`.
+#   BUILD_BNB       1 = build bitsandbytes from source (default), 0 = skip it
+#                   (model then loads in fp16 instead of 4-bit).
+
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:6.2-complete
+FROM ${BASE_IMAGE}
+
+ARG ROCM_INDEX=https://download.pytorch.org/whl/rocm6.2
+ARG BNB_ROCM_ARCH="gfx1030;gfx1100;gfx1101;gfx90a;gfx942"
+ARG BUILD_BNB=1
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-dev git cmake build-essential curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3 /usr/local/bin/python
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.28 /uv /uvx /bin/
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 
-# PyTorch ROCm wheel index. Pin to the ROCm series that matches your host
-# driver (rocm6.2 works for ROCm 6.x driver stacks; older hosts can use
-# rocm6.1 / rocm5.7).
-ARG ROCM_INDEX=https://download.pytorch.org/whl/rocm6.2
+COPY requirements.txt ./
 
-COPY requirements.txt requirements.lock* ./
-# Install the app deps but pull torch/torchvision/torchaudio from the ROCm
-# index. `unsafe-best-match` lets uv prefer the ROCm wheels for torch while
-# still resolving everything else from PyPI.
+# 1. PyTorch from the ROCm wheel index.
+# 2. The rest of the service deps from PyPI — but drop the three GPU-vendor
+#    lines: torch (installed above), turboquant-gpu (NVIDIA cuTile only), and
+#    bitsandbytes (built from source below for ROCm).
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
-    if [ -f requirements.lock ]; then \
-      uv pip install --system \
-        --index-strategy unsafe-best-match \
-        --extra-index-url "$ROCM_INDEX" \
-        -r requirements.lock ; \
+    uv pip install --system --break-system-packages \
+      --index-url "$ROCM_INDEX" \
+      torch \
+ && grep -vE '^(torch|bitsandbytes|turboquant-gpu)' requirements.txt > requirements.rocm.txt \
+ && uv pip install --system --break-system-packages -r requirements.rocm.txt
+
+# 3. bitsandbytes with the HIP backend, compiled for the requested gfx targets.
+RUN if [ "$BUILD_BNB" = "1" ]; then \
+      git clone --depth 1 https://github.com/bitsandbytes-foundation/bitsandbytes.git /tmp/bnb \
+      && cd /tmp/bnb \
+      && cmake -DCOMPUTE_BACKEND=hip -DBNB_ROCM_ARCH="$BNB_ROCM_ARCH" -S . \
+      && make -j"$(nproc)" \
+      && uv pip install --system --break-system-packages . \
+      && rm -rf /tmp/bnb ; \
     else \
-      uv pip install --system \
-        --index-strategy unsafe-best-match \
-        --extra-index-url "$ROCM_INDEX" \
-        -r requirements.txt ; \
+      echo "BUILD_BNB=0 — skipping bitsandbytes; model will load in fp16." ; \
     fi
 
 COPY app.py compute_backends.py ./

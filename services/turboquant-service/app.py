@@ -484,7 +484,12 @@ class ModelManager:
 
         quantization = "fp32"
 
-        if device == "cuda":
+        if device in ("cuda", "rocm"):
+            # NVIDIA (cuda) and AMD (rocm) both drive the GPU through torch.cuda.
+            # bitsandbytes 4-bit NF4 works on both: NVIDIA via its CUDA kernels,
+            # AMD via the HIP backend (the rocm image builds bitsandbytes from
+            # source with COMPUTE_BACKEND=hip). If bitsandbytes is missing or its
+            # GPU kernels can't initialize, we degrade to plain fp16 on-GPU.
             load_kwargs["torch_dtype"] = torch.float16
             load_kwargs["device_map"] = "auto"
             quantization = "fp16"
@@ -497,17 +502,12 @@ class ModelManager:
                     bnb_4bit_quant_type="nf4",
                 )
                 quantization = "4bit-nf4"
-                logger.info("Using bitsandbytes 4-bit quantization")
-            except ImportError:
-                logger.warning("bitsandbytes not available — loading in fp16")
-        elif device == "rocm":
-            # AMD GPU via PyTorch-ROCm. Same torch.cuda API, but bitsandbytes
-            # 4-bit kernels are CUDA-only / unstable on ROCm, so we load the
-            # model in fp16 straight onto the GPU and skip the 4-bit path.
-            load_kwargs["torch_dtype"] = torch.float16
-            load_kwargs["device_map"] = "auto"
-            quantization = "fp16"
-            logger.info("Loading on AMD ROCm GPU in fp16 (bitsandbytes skipped)")
+                logger.info("Using bitsandbytes 4-bit quantization (%s)", device)
+            except Exception:
+                load_kwargs.pop("quantization_config", None)
+                logger.warning(
+                    "bitsandbytes 4-bit unavailable on %s — loading in fp16", device
+                )
         elif device == "mps":
             load_kwargs["torch_dtype"] = torch.float16
             load_kwargs["device_map"] = {"": "mps"}

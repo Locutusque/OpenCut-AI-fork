@@ -253,10 +253,21 @@ each piece yourself.
    (`10.3.0` for RDNA2 / RX 6000, `11.0.0` for RDNA3 / RX 7000). The installer
    leaves a commented hint in `.env` for you.
 
-   > **Why no cuTile / bitsandbytes on ROCm?** The TurboQuant cuTile kernels and
-   > bitsandbytes 4-bit path are NVIDIA-only. On ROCm the model still loads
-   > straight onto the AMD GPU (fp16) and `generate()` runs on-GPU — you just get
-   > the metrics-only turbo backend instead of the fused-kernel KV compression.
+   **bitsandbytes 4-bit on ROCm.** bitsandbytes supports AMD GPUs via its HIP
+   backend ([ROCm 6.2+](https://huggingface.co/docs/bitsandbytes/main/en/installation#multi-backend)),
+   but the prebuilt PyPI wheel ships CUDA kernels only — so `Dockerfile.rocm`
+   compiles it from source with `-DCOMPUTE_BACKEND=hip` for your card's `gfx`
+   target. The installer reads that target from `rocminfo` and writes
+   `BNB_ROCM_ARCH` to `.env`; you can also set it by hand (e.g. `gfx1100` for the
+   RX 7900, `gfx1030` for the RX 6800/6900, `gfx90a;gfx942` for MI200/MI300).
+   The model then loads in 4-bit NF4 on the AMD GPU, same as the NVIDIA path. To
+   skip the (slow) source build and load fp16 instead, set `BUILD_BNB=0` in
+   `.env`.
+
+   > **What stays NVIDIA-only:** the TurboQuant cuTile fused KV-compression
+   > kernels (`turboquant-gpu`). On ROCm the model runs on-GPU through the
+   > metrics-only turbo backend — you keep GPU inference and 4-bit weights, you
+   > just don't get the fused-kernel KV compression.
 
 4. Install dependencies and start the dev server:
 

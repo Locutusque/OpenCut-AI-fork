@@ -164,6 +164,16 @@ case "$GPU_MODE" in
         }
         set_env VIDEO_GID "$VIDEO_GID"
         set_env RENDER_GID "$RENDER_GID"
+        # Compile bitsandbytes (4-bit) for this card's gfx target if we can read it.
+        if command -v rocminfo &>/dev/null; then
+            GFX="$(rocminfo 2>/dev/null | grep -oE 'gfx[0-9a-f]+' | sort -u | paste -sd';' -)"
+            if [ -n "${GFX:-}" ]; then
+                set_env BNB_ROCM_ARCH "$GFX"
+                log_info "Detected GPU gfx target(s): ${GFX} (bitsandbytes will build for these)."
+            fi
+        else
+            log_warn "rocminfo not found — bitsandbytes builds for a broad default arch set (slower build)."
+        fi
         # Preserve any GFX override the user already set; otherwise leave blank.
         grep -q "^HSA_OVERRIDE_GFX_VERSION=" .env || \
             echo "# Uncomment + set if your card needs it (RDNA2=10.3.0, RDNA3=11.0.0):" >> .env
