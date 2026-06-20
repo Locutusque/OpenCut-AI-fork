@@ -192,7 +192,14 @@ export class PlaybackManager {
 		const delta = (now - this.lastUpdate) / 1000;
 		this.lastUpdate = now;
 
-		const speed = this.shuttleDirection === "reverse" ? -this.shuttleSpeed : this.shuttleSpeed;
+		// Normal playback runs at 1x. Shuttle speed only applies while a
+		// shuttle direction is active; otherwise shuttleSpeed is 0 and would
+		// freeze the playhead.
+		const speed = this.shuttleDirection
+			? this.shuttleDirection === "reverse"
+				? -this.shuttleSpeed
+				: this.shuttleSpeed
+			: 1;
 		const newTime = this.currentTime + delta * speed;
 		const duration = this.editor.timeline.getTotalDuration();
 
