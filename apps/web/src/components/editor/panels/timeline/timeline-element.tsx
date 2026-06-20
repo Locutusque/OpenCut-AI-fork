@@ -4,6 +4,7 @@ import { useEditor } from "@/hooks/use-editor";
 import { useAssetsPanelStore } from "@/stores/assets-panel-store";
 import AudioWaveform from "./audio-waveform";
 import { useTimelineElementResize } from "@/hooks/timeline/element/use-element-resize";
+import { useFilmstrip } from "@/hooks/use-filmstrip";
 import {
 	useKeyframeDrag,
 	type KeyframeDragState,
@@ -31,6 +32,7 @@ import type {
 	TimelineElement as TimelineElementType,
 	TimelineTrack,
 	VisualElement,
+	VideoElement,
 	ElementDragState,
 } from "@/types/timeline";
 import type { MediaAsset } from "@/types/assets";
@@ -288,6 +290,8 @@ export function TimelineElement({
 						element={element}
 						track={track}
 						isSelected={isSelected}
+						zoomLevel={zoomLevel}
+						elementWidth={elementWidth}
 						onElementClick={onElementClick}
 						onElementMouseDown={onElementMouseDown}
 						handleResizeStart={handleResizeStart}
@@ -372,6 +376,8 @@ function ElementInner({
 	element,
 	track,
 	isSelected,
+	zoomLevel,
+	elementWidth,
 	onElementClick,
 	onElementMouseDown,
 	handleResizeStart,
@@ -380,6 +386,8 @@ function ElementInner({
 	element: TimelineElementType;
 	track: TimelineTrack;
 	isSelected: boolean;
+	zoomLevel: number;
+	elementWidth: number;
 	onElementClick: (
 		event: React.MouseEvent,
 		element: TimelineElementType,
@@ -436,6 +444,8 @@ function ElementInner({
 							element={element}
 							track={track}
 							isSelected={isSelected}
+							zoomLevel={zoomLevel}
+							elementWidth={elementWidth}
 						/>
 					</div>
 				</button>
@@ -583,6 +593,8 @@ interface ElementContentProps {
 	element: TimelineElementType;
 	track: TimelineTrack;
 	isSelected: boolean;
+	zoomLevel: number;
+	elementWidth: number;
 }
 
 interface ElementContentRendererProps extends ElementContentProps {
@@ -623,6 +635,56 @@ export function renderTiledMedia({
 				pointerEvents: "none",
 			}}
 		/>
+	);
+}
+
+function VideoFilmstrip({
+	element,
+	track,
+	mediaAsset,
+	elementWidth,
+}: {
+	element: VideoElement;
+	track: ElementContentProps["track"];
+	mediaAsset: MediaAsset | undefined;
+	elementWidth: number;
+}): ReactNode {
+	const trackHeight = getTrackHeight({ type: track.type });
+	const { thumbnails } = useFilmstrip({
+		mediaAsset: mediaAsset ?? null,
+		clipDuration: element.duration,
+		visibleWidth: elementWidth,
+		trackHeight,
+		trimStart: element.trimStart,
+		playbackRate: element.playbackRate ?? 1,
+	});
+
+	// While the filmstrip is being generated (or if it fails), fall back to the
+	// single tiled poster thumbnail so the clip is never blank.
+	if (thumbnails.length === 0) {
+		return renderTiledMedia({
+			element,
+			imageUrl: mediaAsset?.thumbnailUrl,
+			track,
+		});
+	}
+
+	const tileWidth = trackHeight * (16 / 9);
+
+	return (
+		<div className="absolute inset-0 flex overflow-hidden">
+			{thumbnails.map((src, index) => (
+				<img
+					// eslint-disable-next-line @next/next/no-img-element
+					key={`${src.slice(0, 16)}-${index}`}
+					src={src}
+					alt=""
+					draggable={false}
+					className="h-full shrink-0 object-cover"
+					style={{ width: tileWidth, pointerEvents: "none" }}
+				/>
+			))}
+		</div>
 	);
 }
 
@@ -852,7 +914,7 @@ const ELEMENT_CONTENT_RENDERERS: Record<
 			</div>
 		);
 	},
-	video: ({ element, track, mediaAssets }) => {
+	video: ({ element, track, mediaAssets, elementWidth }) => {
 		const videoElement = element as Extract<
 			TimelineElementType,
 			{ type: "video" }
@@ -860,11 +922,14 @@ const ELEMENT_CONTENT_RENDERERS: Record<
 		const mediaAsset = mediaAssets.find(
 			(asset) => asset.id === videoElement.mediaId,
 		);
-		return renderTiledMedia({
-			element: videoElement,
-			imageUrl: mediaAsset?.thumbnailUrl,
-			track,
-		});
+		return (
+			<VideoFilmstrip
+				element={videoElement}
+				track={track}
+				mediaAsset={mediaAsset}
+				elementWidth={elementWidth}
+			/>
+		);
 	},
 	image: ({ element, track, mediaAssets }) => {
 		const imageElement = element as Extract<
@@ -882,7 +947,13 @@ const ELEMENT_CONTENT_RENDERERS: Record<
 	},
 };
 
-function ElementContent({ element, track, isSelected }: ElementContentProps) {
+function ElementContent({
+	element,
+	track,
+	isSelected,
+	zoomLevel,
+	elementWidth,
+}: ElementContentProps) {
 	const editor = useEditor();
 	const renderer = ELEMENT_CONTENT_RENDERERS[element.type];
 	return (
@@ -891,6 +962,8 @@ function ElementContent({ element, track, isSelected }: ElementContentProps) {
 				element,
 				track,
 				isSelected,
+				zoomLevel,
+				elementWidth,
 				mediaAssets: editor.media.getAssets(),
 				editor,
 			})}

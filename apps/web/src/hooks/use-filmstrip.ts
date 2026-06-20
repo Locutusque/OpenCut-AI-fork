@@ -25,15 +25,19 @@ async function generateFilmstrip({
 	numFrames,
 	width,
 	height,
+	sourceStart,
+	sourceEnd,
 }: {
 	mediaAsset: MediaAsset;
 	numFrames: number;
 	width: number;
 	height: number;
+	sourceStart: number;
+	sourceEnd: number;
 }): Promise<string[]> {
 	if (mediaAsset.type !== "video" || !mediaAsset.url) return [];
 
-	const cacheKey = `${mediaAsset.id}-${numFrames}-${width}`;
+	const cacheKey = `${mediaAsset.id}-${numFrames}-${width}-${sourceStart.toFixed(3)}-${sourceEnd.toFixed(3)}`;
 	const cached = CACHE.get(cacheKey);
 	if (cached) return cached;
 
@@ -56,8 +60,14 @@ async function generateFilmstrip({
 				return;
 			}
 
+			// Sample within the clip's trimmed source range, clamped to the
+			// actual media duration.
+			const rangeStart = Math.max(0, Math.min(sourceStart, duration));
+			const rangeEnd = Math.max(rangeStart, Math.min(sourceEnd, duration));
+			const span = rangeEnd - rangeStart;
+
 			const frames: string[] = [];
-			const interval = duration / numFrames;
+			const interval = span / numFrames;
 
 			const captureFrame = (index: number) => {
 				if (index >= numFrames) {
@@ -68,7 +78,7 @@ async function generateFilmstrip({
 					return;
 				}
 
-				video.currentTime = interval * (index + 0.5);
+				video.currentTime = rangeStart + interval * (index + 0.5);
 			};
 
 			video.onseeked = () => {
@@ -103,11 +113,15 @@ export function useFilmstrip({
 	clipDuration,
 	visibleWidth,
 	trackHeight,
+	trimStart = 0,
+	playbackRate = 1,
 }: {
 	mediaAsset: MediaAsset | null;
 	clipDuration: number;
 	visibleWidth: number;
 	trackHeight: number;
+	trimStart?: number;
+	playbackRate?: number;
 }): FilmstripState {
 	const [state, setState] = useState<FilmstripState>({ thumbnails: [], loading: false });
 	const abortRef = useRef(false);
@@ -121,6 +135,11 @@ export function useFilmstrip({
 		const thumbWidth = Math.max(40, Math.round(trackHeight * 16 / 9));
 		const numFrames = Math.max(1, Math.min(20, Math.ceil(visibleWidth / thumbWidth)));
 
+		// Map the timeline clip back to its source range so each thumbnail
+		// reflects the portion of the video that actually plays.
+		const sourceStart = trimStart;
+		const sourceEnd = trimStart + clipDuration * playbackRate;
+
 		setState({ thumbnails: [], loading: true });
 
 		const thumbnails = await generateFilmstrip({
@@ -128,12 +147,14 @@ export function useFilmstrip({
 			numFrames,
 			width: thumbWidth,
 			height: trackHeight,
+			sourceStart,
+			sourceEnd,
 		});
 
 		if (!abortRef.current) {
 			setState({ thumbnails, loading: false });
 		}
-	}, [mediaAsset?.id, clipDuration, visibleWidth, trackHeight]);
+	}, [mediaAsset?.id, clipDuration, visibleWidth, trackHeight, trimStart, playbackRate]);
 
 	useEffect(() => {
 		abortRef.current = false;
